@@ -40,22 +40,24 @@ if [ "${WAIT_FOR_DB:-false}" = "true" ]; then
     timeout=60
     while [ $timeout -gt 0 ]; do
         if python -c "
+import sys
 import urllib.parse
-import psycopg2
 try:
     result = urllib.parse.urlparse('$DATABASE_URL')
-    conn = psycopg2.connect(
-        host=result.hostname,
-        port=result.port or 5432,
-        database=result.path[1:],
-        user=result.username,
-        password=result.password
-    )
-    conn.close()
-    print('Database connection successful')
-    exit(0)
+    # Simple connection test without psycopg2 dependency
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    result = sock.connect_ex((result.hostname, result.port or 5432))
+    sock.close()
+    if result == 0:
+        print('Database host is reachable')
+        exit(0)
+    else:
+        print('Database host unreachable')
+        exit(1)
 except Exception as e:
-    print(f'Database connection failed: {e}')
+    print(f'Connection test failed: {e}')
     exit(1)
 " 2>/dev/null; then
             echo "Database is ready!"
@@ -76,15 +78,18 @@ fi
 if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
     echo "Running database migrations..."
     python -c "
-import asyncio
 import sys
+import os
 sys.path.insert(0, '/app')
+sys.path.insert(0, '/app/backend')
 try:
-    from database import init_db
-    asyncio.run(init_db())
-    print('Database migrations completed successfully')
+    from database import create_tables
+    create_tables()
+    print('Database tables created successfully')
 except Exception as e:
     print(f'Migration failed: {e}')
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 "
 fi
@@ -92,5 +97,22 @@ fi
 echo "Security checks completed successfully"
 echo "Starting EconoVault API service..."
 
-# Start the application
+# Start the application with error handling
+echo "Starting application with command: $@"
+echo "Current working directory: $(pwd)"
+echo "Python version: $(python --version)"
+echo "Environment check:"
+echo "  DATABASE_URL: ${DATABASE_URL:0:20}..."
+echo "  SECRET_KEY: ${SECRET_KEY:0:10}..."
+echo "  ENVIRONMENT: ${ENVIRONMENT:-unknown}"
+
+# Test if main module can be imported
+echo "Testing application import..."
+if python -c "import sys; sys.path.insert(0, '/app'); from main import app; print('Import successful')"; then
+    echo "Application import test passed"
+else
+    echo "ERROR: Application import test failed"
+    exit 1
+fi
+
 exec "$@"

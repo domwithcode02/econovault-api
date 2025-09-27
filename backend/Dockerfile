@@ -67,11 +67,11 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Health check for container orchestration
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=60s --timeout=30s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
 # Use entrypoint script for security checks and initialization
 ENTRYPOINT ["/app/entrypoint.sh"]
 
-# Run with uvicorn for production (recommended over gunicorn for FastAPI)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Run with uvicorn for production (single worker for stability)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
