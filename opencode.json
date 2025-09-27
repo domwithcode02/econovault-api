@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "chutes": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Chutes.ai",
+      "options": {
+        "baseURL": "https://llm.chutes.ai/v1",
+        "headers": {
+          "Authorization": "Bearer cpk_e33c3b855e25465f8834d72faef5efce.f638cc939c365cc1ae28b3563d8b1e40.WL5b4ICdNd9qiwRXJIRjGUelQGKNVjYI"
+        }
+      },
+      "models": {
+        "zai-org/GLM-4.5-turbo": {
+          "name": "GLM 4.5 Turbo"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "context7": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@upstash/context7-mcp"
+      ],
+      "enabled": true,
+      "environment": {
+        "NODE_ENV": "production"
+      }
+    },
+    "sequentialthinking": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "enabled": true,
+      "environment": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

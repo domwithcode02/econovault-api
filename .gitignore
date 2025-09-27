@@ -101,3 +101,28 @@ venv.bak/
 
 # Opencode files
 .opencode/sc x
+.opencode/agent/AnalyticsResearchAgent.md
+.opencode/agent/ArchitectureResearchAgent.md
+.opencode/agent/AuthenticationResearchAgent.md
+.opencode/agent/ComplianceReportingResearchAgent.md
+.opencode/agent/CryptographyResearchAgent.md
+.opencode/agent/DatabaseResearchAgent.md
+.opencode/agent/DataModelingResearchAgent.md
+.opencode/agent/DeploymentResearchAgent.md
+.opencode/agent/DocumentationResearchAgent.md
+.opencode/agent/ErrorHandlingResearchAgent.md
+.opencode/agent/FinancialStandardsResearchAgent.md
+.opencode/agent/MonitoringResearchAgent.md
+.opencode/agent/PaymentProcessingResearchAgent.md
+.opencode/agent/PerformanceResearchAgent.md
+.opencode/agent/PythonResearchAgent.md
+.opencode/agent/RESTAPIResearchAgent.md
+.opencode/agent/SecurityResearchAgent.md
+.opencode/agent/TestingResearchAgent.md
+.opencode/agent/ThirdPartyIntegrationResearchAgent.md
+docs/prd.md
+docs/task_list.md
+WORKSTREAM_3_SUMMARY.md
+DEPLOYMENT_GUIDE.md
+IMPLEMENTATION_SUMMARY.md
+infrastructure_info.md

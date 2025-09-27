@@ -5,7 +5,7 @@ services:
   - type: web
     name: econovault-api-sandbox
     env: docker
-    repo: https://github.com/your-username/econovault-api  # Replace with your repo
+    repo: https://github.com/domwithcode02/econovault-api  # Replace with your repo
     branch: develop  # Use develop branch for sandbox
     dockerContext: ./backend
     dockerfilePath: ./backend/Dockerfile
