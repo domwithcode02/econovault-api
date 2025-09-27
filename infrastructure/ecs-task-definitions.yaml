@@ -1,0 +1,534 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Task Definitions for EconoVault API'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: 'econovault-api'
+    Description: 'Name of the application'
+  
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+  
+  ImageUri:
+    Type: String
+    Description: 'URI of the container image in ECR'
+    Default: '123456789012.dkr.ecr.us-west-1.amazonaws.com/econovault-api:latest'
+  
+  ContainerPort:
+    Type: Number
+    Default: 8000
+    Description: 'Port exposed by the container'
+  
+  TaskCPU:
+    Type: String
+    Default: '1024'
+    Description: 'CPU units for the task'
+  
+  TaskMemory:
+    Type: String
+    Default: '2048'
+    Description: 'Memory (MiB) for the task'
+  
+  ContainerCPU:
+    Type: String
+    Default: '512'
+    Description: 'CPU units for the container'
+  
+  ContainerMemory:
+    Type: String
+    Default: '1024'
+    Description: 'Memory (MiB) for the container'
+  
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: 'CloudWatch log retention period in days'
+  
+  HealthCheckPath:
+    Type: String
+    Default: '/health'
+    Description: 'Health check endpoint path'
+  
+  DatabaseHost:
+    Type: String
+    Default: 'econovault-db.cx8k6c0mwva4.us-west-1.rds.amazonaws.com'
+    Description: 'Database host endpoint'
+  
+  RedisEndpoint:
+    Type: String
+    Default: 'redis-endpoint:6379'
+    Description: 'Redis cache endpoint'
+
+Resources:
+  # Task Execution Role - Allows ECS to pull images and write logs
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-${Environment}-ecs-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/*'
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ApplicationName}/*'
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: '*'
+
+  # Task Role - Allows containers to access AWS services
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-${Environment}-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ApplicationName}-data-${AWS::AccountId}'
+                  - !Sub 'arn:aws:s3:::${ApplicationName}-data-${AWS::AccountId}/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ApplicationName}-*'
+        - PolicyName: CloudWatchMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': !Sub '${ApplicationName}/${Environment}'
+
+  # Main Application Task Definition
+  ApplicationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ApplicationName}-${Environment}'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref TaskCPU
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: !Ref ApplicationName
+          Image: !Ref ImageUri
+          Essential: true
+          Cpu: !Ref ContainerCPU
+          Memory: !Ref ContainerMemory
+          MemoryReservation: !Ref ContainerMemory
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              Name: !Sub '${ApplicationName}-port'
+              AppProtocol: http
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: PORT
+              Value: !Ref ContainerPort
+            - Name: LOG_LEVEL
+              Value: !If [IsProduction, 'info', 'debug']
+            - Name: DATABASE_URL
+              Value: !Sub 'postgresql://econovault_admin:${DatabasePassword}@${DatabaseHost}/econovault'
+            - Name: REDIS_URL
+              Value: !Sub 'redis://${RedisEndpoint}'
+            - Name: BLS_API_KEY
+              Value: !Ref BLSApiKey
+            - Name: BEA_API_KEY
+              Value: !Ref BEAApiKey
+            - Name: FRED_API_KEY
+              Value: !Ref FREDApiKey
+          Secrets:
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/database-password'
+            - Name: JWT_SECRET
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/jwt-secret'
+            - Name: ENCRYPTION_KEY
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/encryption-key'
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'curl -f http://localhost:${ContainerPort}${HealthCheckPath} || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ApplicationLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: !Sub '${ApplicationName}-${Environment}'
+              awslogs-create-group: 'true'
+              mode: non-blocking
+              max-buffer-size: 25m
+          LinuxParameters:
+            Capabilities:
+              Drop:
+                - ALL
+            InitProcessEnabled: true
+          ReadonlyRootFilesystem: true
+          User: '1000:1000'
+          DependsOn: []
+
+  # Multi-Container Task Definition with Sidecar
+  MultiContainerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ApplicationName}-${Environment}-multi'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '2048'
+      Memory: '4096'
+      ExecutionRoleArn: !Ref TaskExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: fluent-bit
+          Image: amazon/aws-for-fluent-bit:stable
+          Essential: true
+          Cpu: 256
+          Memory: 512
+          FirelensConfiguration:
+            Type: fluentbit
+            Options:
+              enable-ecs-log-metadata: 'true'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FireLensLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: fluent-bit
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'echo ''{"health": "check"}'' | nc -w 1 127.0.0.1 2020 || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+        - Name: !Ref ApplicationName
+          Image: !Ref ImageUri
+          Essential: true
+          Cpu: 1024
+          Memory: 2048
+          MemoryReservation: 1024
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+              Name: !Sub '${ApplicationName}-port'
+              AppProtocol: http
+          DependsOn:
+            - ContainerName: fluent-bit
+              Condition: START
+          Environment:
+            - Name: ENVIRONMENT
+              Value: !Ref Environment
+            - Name: PORT
+              Value: !Ref ContainerPort
+            - Name: LOG_LEVEL
+              Value: !If [IsProduction, 'info', 'debug']
+            - Name: DATABASE_URL
+              Value: !Sub 'postgresql://econovault_admin:${DatabasePassword}@${DatabaseHost}/econovault'
+            - Name: REDIS_URL
+              Value: !Sub 'redis://${RedisEndpoint}'
+            - Name: BLS_API_KEY
+              Value: !Ref BLSApiKey
+            - Name: BEA_API_KEY
+              Value: !Ref BEAApiKey
+            - Name: FRED_API_KEY
+              Value: !Ref FREDApiKey
+          Secrets:
+            - Name: DATABASE_PASSWORD
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/database-password'
+            - Name: JWT_SECRET
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/jwt-secret'
+            - Name: ENCRYPTION_KEY
+              ValueFrom: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ApplicationName}/encryption-key'
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'curl -f http://localhost:${ContainerPort}${HealthCheckPath} || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awsfirelens
+            Options:
+              Name: cloudwatch
+              region: !Ref AWS::Region
+              log_group_name: !Ref ApplicationLogGroup
+              log_stream_prefix: !Sub '${ApplicationName}-${Environment}/'
+              auto_create_group: 'true'
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            Capabilities:
+              Drop:
+                - ALL
+            InitProcessEnabled: true
+          User: '1000:1000'
+        - Name: cloudwatch-agent
+          Image: amazon/cloudwatch-agent:latest
+          Essential: true
+          Cpu: 256
+          Memory: 512
+          Environment:
+            - Name: CW_CONFIG_CONTENT
+              Value: !Sub |
+                {
+                  "metrics": {
+                    "namespace": "${ApplicationName}/${Environment}",
+                    "metrics_collected": {
+                      "cpu": {
+                        "measurement": ["cpu_usage_idle", "cpu_usage_iowait"],
+                        "metrics_collection_interval": 60
+                      },
+                      "disk": {
+                        "measurement": ["used_percent"],
+                        "metrics_collection_interval": 60,
+                        "resources": ["*"]
+                      },
+                      "mem": {
+                        "measurement": ["mem_used_percent"],
+                        "metrics_collection_interval": 60
+                      }
+                    }
+                  }
+                }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchAgentLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: cw-agent
+          DependsOn:
+            - ContainerName: fluent-bit
+              Condition: START
+
+  # CloudWatch Log Groups
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+
+  FireLensLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/fluent-bit'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+
+  CloudWatchAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/cloudwatch-agent'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+
+  # Secrets Manager Secrets
+  DatabasePassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ApplicationName}/database-password'
+      Description: 'Database password for EconoVault API'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "econovault_admin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  JWTSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ApplicationName}/jwt-secret'
+      Description: 'JWT secret key for authentication'
+      GenerateSecretString:
+        SecretStringTemplate: '{"alg": "HS256"}'
+        GenerateStringKey: 'secret'
+        PasswordLength: 64
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EncryptionKey:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ApplicationName}/encryption-key'
+      Description: 'Encryption key for sensitive data'
+      GenerateSecretString:
+        SecretStringTemplate: '{"version": "1.0"}'
+        GenerateStringKey: 'key'
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # API Keys as Parameters (not secrets for demo purposes)
+  BLSApiKey:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ApplicationName}/${Environment}/bls-api-key'
+      Type: String
+      Value: '979efbd4aad74e8aa9e6ee4be5d060b3'
+      Description: 'Bureau of Labor Statistics API key'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  BEAApiKey:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ApplicationName}/${Environment}/bea-api-key'
+      Type: String
+      Value: '1353B160-BC58-497C-9C35-B844B02152D1'
+      Description: 'Bureau of Economic Analysis API key'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+  FREDApiKey:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/${ApplicationName}/${Environment}/fred-api-key'
+      Type: String
+      Value: '5a73801de083c3e4f0133fd19434cf49'
+      Description: 'Federal Reserve Economic Data API key'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+
+Mappings:
+  EnvironmentConfig:
+    development:
+      LogClass: INFREQUENT_ACCESS
+      LogLevel: debug
+    staging:
+      LogClass: INFREQUENT_ACCESS
+      LogLevel: info
+    production:
+      LogClass: STANDARD
+      LogLevel: info
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, 'production']
+
+Outputs:
+  TaskDefinitionArn:
+    Description: 'ARN of the main task definition'
+    Value: !Ref ApplicationTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinitionArn'
+  
+  MultiContainerTaskDefinitionArn:
+    Description: 'ARN of the multi-container task definition'
+    Value: !Ref MultiContainerTaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-MultiContainerTaskDefinitionArn'
+  
+  TaskExecutionRoleArn:
+    Description: 'ARN of the task execution role'
+    Value: !Ref TaskExecutionRole
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskExecutionRoleArn'
+  
+  TaskRoleArn:
+    Description: 'ARN of the task role'
+    Value: !Ref TaskRole
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskRoleArn'
+  
+  ApplicationLogGroupName:
+    Description: 'Name of the application log group'
+    Value: !Ref ApplicationLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationLogGroupName'
+  
+  DatabasePasswordSecretArn:
+    Description: 'ARN of the database password secret'
+    Value: !Ref DatabasePassword
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabasePasswordSecretArn'

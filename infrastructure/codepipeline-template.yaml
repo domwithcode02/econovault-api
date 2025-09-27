@@ -1,0 +1,335 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Multi-environment CodePipeline for EconoVault API with financial-grade security'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: econovault-api
+    Description: Name of the application
+  
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner
+  
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name
+  
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch name
+  
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub personal access token
+  
+  NotificationEmail:
+    Type: String
+    Description: Email for pipeline notifications
+
+Resources:
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${ApplicationName}-pipeline'
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactBucket
+        EncryptionKey:
+          Id: !Ref KMSKey
+          Type: KMS
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: SourceCode
+              RunOrder: 1
+        
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+                EnvironmentVariables: |
+                  [
+                    {
+                      "name": "ENVIRONMENT",
+                      "value": "dev"
+                    }
+                  ]
+              InputArtifacts:
+                - Name: SourceCode
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        
+        - Name: Dev-Deploy
+          Actions:
+            - Name: DeployToDev
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              Configuration:
+                ClusterName: !Sub '${ApplicationName}-dev-cluster'
+                ServiceName: !Sub '${ApplicationName}-dev-service'
+                FileName: imagedefinitions.json
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        
+        - Name: Staging-Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !Ref SNSTopic
+                CustomData: "Ready for staging deployment?"
+              RunOrder: 1
+        
+        - Name: Staging-Deploy
+          Actions:
+            - Name: DeployToStaging
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: '1'
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Sub '${ApplicationName}-staging-dg'
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        
+        - Name: Production-Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !Ref SNSTopic
+                CustomData: "Ready for production deployment?"
+              RunOrder: 1
+        
+        - Name: Production-Deploy
+          Actions:
+            - Name: BlueGreenDeploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: '1'
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Sub '${ApplicationName}-prod-dg'
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipelineFullAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt PipelineArtifactBucket.Arn
+                  - !Sub '${PipelineArtifactBucket.Arn}/*'
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt CodeBuildProject.Arn
+
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-pipeline-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 90
+          - Id: TransitionToIA
+            Status: Enabled
+            TransitionInDays: 30
+            StorageClass: STANDARD_IA
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-build'
+      Description: !Sub 'CodeBuild project for ${ApplicationName}'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: PROJECT_NAME
+            Value: !Ref ApplicationName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_REPOSITORY_URI
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ApplicationName}'
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: backend/buildspec.yml
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      TimeoutInMinutes: 30
+      EncryptionKey: !Ref KMSKey
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildManagedPolicy
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: '*'
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub '${ApplicationName}-codedeploy-app'
+      ComputePlatform: ECS
+
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for pipeline encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CodePipeline to use the key
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-pipeline-notifications'
+      DisplayName: !Sub '${ApplicationName} Pipeline Notifications'
+      KmsMasterKeyId: !Ref KMSKey
+
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SNSTopic
+      Endpoint: !Ref NotificationEmail
+
+Outputs:
+  PipelineName:
+    Description: Name of the CodePipeline
+    Value: !Ref CodePipeline
+    Export:
+      Name: !Sub '${ApplicationName}-PipelineName'
+  
+  PipelineArtifactBucket:
+    Description: S3 bucket for pipeline artifacts
+    Value: !Ref PipelineArtifactBucket
+    Export:
+      Name: !Sub '${ApplicationName}-ArtifactBucket'

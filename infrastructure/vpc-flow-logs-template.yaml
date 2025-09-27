@@ -1,0 +1,524 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VPC Flow Logs Configuration for EconoVault Financial API - Compliance Monitoring'
+
+Parameters:
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC ID for flow logs"
+  
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: "Environment name for resource naming"
+  
+  RetentionDays:
+    Type: Number
+    Default: 2555  # 7 years for financial compliance
+    Description: "S3 object retention period in days (7 years for financial compliance)"
+  
+  LogFormat:
+    Type: String
+    Default: "${version} ${vpc-id} ${subnet-id} ${instance-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${tcp-flags} ${action} ${reject-reason} ${pkt-srcaddr} ${pkt-dstaddr} ${flow-direction} ${traffic-path}"
+    Description: "Custom log format for security analysis"
+  
+  EnableParquet:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "Enable Parquet format for cost optimization"
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, production]
+  EnableParquet: !Equals [!Ref EnableParquet, "true"]
+
+Resources:
+  # S3 Bucket for Flow Logs with compliance features
+  FlowLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'econovault-flowlogs-${AWS::AccountId}-${Environment}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref FlowLogsKMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveAfter30Days
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+            ExpirationInDays: !Ref RetentionDays
+          - Id: DeleteIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: COMPLIANCE
+            Days: !Ref RetentionDays
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Compliance
+          Value: SOC2-PCI
+        - Key: DataClassification
+          Value: Confidential
+
+  # KMS Key for S3 encryption
+  FlowLogsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS key for VPC Flow Logs encryption"
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow VPC Flow Logs to use the key
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+          - Sid: Allow CloudWatch Logs to use the key
+            Effect: Allow
+            Principal:
+              Service: logs.${AWS::Region}.amazonaws.com
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+
+  # CloudWatch Log Group for real-time analysis
+  FlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vpc/flowlogs/econovault-${Environment}"
+      RetentionInDays: 90
+      KmsKeyId: !Ref FlowLogsKMSKey
+
+  # IAM Role for Flow Logs
+  FlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonVPCFlowLogsFullAccess
+      Policies:
+        - PolicyName: FlowLogsS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub '${FlowLogsBucket.Arn}'
+                  - !Sub '${FlowLogsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'logs:DescribeLogGroups'
+                  - 'logs:DescribeLogStreams'
+                Resource:
+                  - !Sub '${FlowLogsLogGroup.Arn}'
+                  - !Sub '${FlowLogsLogGroup.Arn}:*'
+
+  # VPC Flow Logs to S3 (Long-term storage)
+  FlowLogS3:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceIds: [!Ref VPCId]
+      TrafficType: ALL
+      LogDestinationType: s3
+      LogDestination: !Sub '${FlowLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/vpcflowlogs/'
+      LogFormat: !Ref LogFormat
+      LogFileFormat: !If [EnableParquet, parquet, plain-text]
+      MaxAggregationInterval: 60
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Compliance
+          Value: SOC2-PCI
+
+  # VPC Flow Logs to CloudWatch (Real-time analysis)
+  FlowLogCloudWatch:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceIds: [!Ref VPCId]
+      TrafficType: REJECT  # Focus on rejected connections for security
+      LogDestinationType: cloudwatch-logs
+      LogGroupName: !Ref FlowLogsLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      LogFormat: !Ref LogFormat
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Purpose
+          Value: SecurityAnalysis
+
+  # Athena Workgroup for security analysis
+  SecurityAnalysisWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "econovault-security-${Environment}"
+      Description: "Athena workgroup for security analysis of VPC flow logs"
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${FlowLogsBucket}/athena-results/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_KMS
+            KmsKey: !Ref FlowLogsKMSKey
+        PublishCloudWatchMetrics: true
+        RequesterPaysEnabled: false
+        EngineVersion:
+          SelectedEngineVersion: "Athena engine version 3"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Purpose
+          Value: SecurityAnalysis
+
+  # Lambda function for real-time security analysis
+  SecurityAnalysisLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "econovault-flowlog-analyzer-${Environment}"
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt SecurityAnalysisLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import gzip
+          import base64
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              cw_data = event['awslogs']['data']
+              compressed_payload = base64.b64decode(cw_data)
+              uncompressed_payload = gzip.decompress(compressed_payload)
+              payload = json.loads(uncompressed_payload)
+              
+              security_hub = boto3.client('securityhub')
+              
+              for log_event in payload['logEvents']:
+                  message = log_event['message']
+                  fields = message.split()
+                  
+                  if len(fields) >= 14:
+                      action = fields[12] if len(fields) > 12 else 'ACCEPT'
+                      
+                      # Focus on rejected connections for security analysis
+                      if action == 'REJECT':
+                          security_finding = {
+                              'SchemaVersion': '2018-10-08',
+                              'Id': f"vpc-flow-reject-{fields[10]}-{fields[11]}",
+                              'ProductArn': f"arn:aws:securityhub:{os.environ['AWS_REGION']}:{os.environ['AWS_ACCOUNT_ID']}:product/{os.environ['AWS_ACCOUNT_ID']}/default",
+                              'GeneratorId': 'vpc-flow-logs-analyzer',
+                              'AwsAccountId': os.environ['AWS_ACCOUNT_ID'],
+                              'Types': ['Software and Configuration Checks/VPC Flow Logs'],
+                              'FirstObservedAt': datetime.utcnow().isoformat(),
+                              'LastObservedAt': datetime.utcnow().isoformat(),
+                              'CreatedAt': datetime.utcnow().isoformat(),
+                              'UpdatedAt': datetime.utcnow().isoformat(),
+                              'Severity': {
+                                  'Label': 'MEDIUM',
+                                  'Original': 'MEDIUM'
+                              },
+                              'Confidence': 85,
+                              'Title': 'VPC Flow Rejected Connection',
+                              'Description': f"Rejected connection from {fields[3]}:{fields[5]} to {fields[4]}:{fields[6]}",
+                              'Remediation': {
+                                  'Recommendation': {
+                                      'Text': 'Review security group rules and network ACLs'
+                                  }
+                              },
+                              'SourceUrl': f"https://console.aws.amazon.com/vpc/home?region={os.environ['AWS_REGION']}#flowLogs:",
+                              'ProductFields': {
+                                  'vpc-id': fields[1] if len(fields) > 1 else 'unknown',
+                                  'srcaddr': fields[3] if len(fields) > 3 else 'unknown',
+                                  'dstaddr': fields[4] if len(fields) > 4 else 'unknown',
+                                  'srcport': fields[5] if len(fields) > 5 else 'unknown',
+                                  'dstport': fields[6] if len(fields) > 6 else 'unknown',
+                                  'protocol': fields[7] if len(fields) > 7 else 'unknown',
+                                  'action': action
+                              },
+                              'UserDefinedFields': {},
+                              'Malware': {
+                                  'Name': 'suspicious-network-activity'
+                              },
+                              'Network': {
+                                  'Direction': 'IN' if fields[13] == 'ingress' else 'OUT' if len(fields) > 13 else 'unknown',
+                                  'Protocol': fields[7] if len(fields) > 7 else 'unknown',
+                                  'SourceIpV4': fields[3] if len(fields) > 3 else 'unknown',
+                                  'SourcePort': int(fields[5]) if len(fields) > 5 and fields[5].isdigit() else 0,
+                                  'SourceDomain': 'unknown',
+                                  'SourceMac': 'unknown',
+                                  'DestinationIpV4': fields[4] if len(fields) > 4 else 'unknown',
+                                  'DestinationPort': int(fields[6]) if len(fields) > 6 and fields[6].isdigit() else 0,
+                                  'DestinationDomain': 'unknown',
+                                  'DestinationMac': 'unknown'
+                              },
+                              'NetworkPath': [],
+                              'Process': {
+                                  'Name': 'network-flow',
+                                  'Path': 'vpc-flow-logs'
+                              },
+                              'ThreatIntelIndicators': [],
+                              'Resources': [
+                                  {
+                                      'Type': 'AwsEc2Instance',
+                                      'Id': f"arn:aws:ec2:{os.environ['AWS_REGION']}:{os.environ['AWS_ACCOUNT_ID']}:instance/{fields[2] if len(fields) > 2 else 'unknown'}",
+                                      'Partition': 'aws',
+                                      'Region': os.environ['AWS_REGION'],
+                                      'Details': {
+                                          'AwsEc2Instance': {
+                                              'Type': 't3.micro',
+                                              'ImageId': 'unknown',
+                                              'IpV4Addresses': [fields[3] if len(fields) > 3 else 'unknown'],
+                                              'IpV6Addresses': [],
+                                              'KeyName': 'unknown',
+                                              'IamInstanceProfileArn': 'unknown',
+                                              'VpcId': fields[1] if len(fields) > 1 else 'unknown',
+                                              'SubnetId': 'unknown',
+                                              'LaunchedAt': datetime.utcnow().isoformat()
+                                          }
+                                      }
+                                  }
+                              ],
+                              'Compliance': {
+                                  'Status': 'FAILED',
+                                  'RelatedRequirements': [
+                                      'CIS AWS Foundations Benchmark v3.0.0/EC2.6',
+                                      'PCI DSS v3.2.1/1.1',
+                                      'NIST SP 800-53 Rev. 5/AC-4'
+                                  ]
+                              },
+                              'VerificationState': 'UNKNOWN',
+                              'WorkflowState': 'NEW',
+                              'Workflow': {
+                                  'Status': 'NEW'
+                              },
+                              'RecordState': 'ACTIVE'
+                          }
+                          
+                          try:
+                              response = security_hub.batch_import_findings(Findings=[security_finding])
+                              print(f"Security Hub finding created: {response}")
+                          except Exception as e:
+                              print(f"Error creating Security Hub finding: {e}")
+              
+              return {'statusCode': 200, 'body': json.dumps('Security analysis completed')}
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+      Timeout: 60
+      MemorySize: 256
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Purpose
+          Value: SecurityAnalysis
+
+  # Lambda Role for security analysis
+  SecurityAnalysisLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecurityHubAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'securityhub:BatchImportFindings'
+                  - 'securityhub:GetFindings'
+                  - 'securityhub:DescribeHub'
+                Resource: '*'
+
+  # CloudWatch Metric Filters for security monitoring
+  RejectedConnectionsMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref FlowLogsLogGroup
+      FilterPattern: '[version, account_id, interface_id, srcaddr, dstaddr, srcport, dstport, protocol, packets, bytes, start, end, action=REJECT]'
+      MetricTransformations:
+        - MetricNamespace: "EconoVault/Security"
+          MetricName: "RejectedConnections"
+          MetricValue: "1"
+          DefaultValue: 0
+
+  # CloudWatch Alarms for security events
+  HighRejectionRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "EconoVault-HighRejectionRate-${Environment}"
+      AlarmDescription: "High rate of rejected connections detected"
+      MetricName: "RejectedConnections"
+      Namespace: "EconoVault/Security"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SecurityNotificationTopic
+
+  # SNS Topic for security notifications
+  SecurityNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "econovault-flowlogs-security-${Environment}"
+      DisplayName: "EconoVault Flow Logs Security Alerts"
+      KmsMasterKeyId: !Ref FlowLogsKMSKey
+
+  # Subscription for security notifications
+  SecurityNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref SecurityNotificationTopic
+      Endpoint: "security-team@example.com"  # Replace with actual email
+
+  # Athena Named Query for security analysis
+  SecurityAnalysisQuery:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Name: !Sub "TopRejectedConnections-${Environment}"
+      Database: !Ref SecurityAnalysisDatabase
+      WorkGroup: !Ref SecurityAnalysisWorkgroup
+      QueryString: |
+        SELECT 
+          srcaddr,
+          dstport,
+          COUNT(*) as rejection_count,
+          approx_distinct(dstaddr) as unique_targets
+        FROM vpc_flow_logs 
+        WHERE action = 'REJECT' 
+          AND year = year(current_date)
+          AND month = month(current_date)
+          AND day = day(current_date)
+        GROUP BY srcaddr, dstport
+        HAVING COUNT(*) > 100 AND unique_targets > 10
+        ORDER BY rejection_count DESC
+        LIMIT 100;
+
+  # Glue Database for Athena queries
+  SecurityAnalysisDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Name: !Sub "econovault_security_${Environment}"
+        Description: "Database for EconoVault security analysis"
+      CatalogId: !Ref AWS::AccountId
+
+Outputs:
+  FlowLogsBucketArn:
+    Description: "ARN of the S3 bucket for flow logs"
+    Value: !GetAtt FlowLogsBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-FlowLogsBucketArn"
+  
+  FlowLogsBucketName:
+    Description: "Name of the S3 bucket for flow logs"
+    Value: !Ref FlowLogsBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-FlowLogsBucketName"
+  
+  LogGroupName:
+    Description: "Name of the CloudWatch log group"
+    Value: !Ref FlowLogsLogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroupName"
+  
+  AthenaWorkgroupName:
+    Description: "Name of the Athena workgroup"
+    Value: !Ref SecurityAnalysisWorkgroup
+    Export:
+      Name: !Sub "${AWS::StackName}-AthenaWorkgroupName"
+  
+  SecurityTopicArn:
+    Description: "ARN of the security notification topic"
+    Value: !Ref SecurityNotificationTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-SecurityTopicArn"
+  
+  EstimatedMonthlyCost:
+    Description: "Estimated monthly cost for flow logs"
+    Value: !If
+      - IsProduction
+      - "$50-150"
+      - "$20-50"
+    Export:
+      Name: !Sub "${AWS::StackName}-EstimatedCost"
+  
+  ComplianceStatus:
+    Description: "Compliance frameworks supported"
+    Value: "CIS AWS Foundations, PCI DSS, NIST SP 800-53, SOC2"
+    Export:
+      Name: !Sub "${AWS::StackName}-ComplianceStatus"

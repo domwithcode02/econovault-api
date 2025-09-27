@@ -1,0 +1,460 @@
+name: EconoVault API CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  release:
+    types: [published]
+
+env:
+  PYTHON_VERSION: '3.11'
+  UVICORN_WORKERS: 2
+
+jobs:
+  # Security and Code Quality Checks
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install security tools
+        run: |
+          pip install safety bandit semgrep
+          
+      - name: Run Safety (dependency vulnerabilities)
+        run: safety check --json --output safety-report.json || true
+        
+      - name: Run Bandit (code security)
+        run: bandit -r backend/ -f json -o bandit-report.json || true
+        
+      - name: Run Semgrep (SAST)
+        run: semgrep --config=auto --json --output=semgrep-report.json backend/ || true
+        
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            safety-report.json
+            bandit-report.json
+            semgrep-report.json
+
+  # Code Quality and Linting
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install linting tools
+        run: |
+          pip install ruff black isort mypy
+          
+      - name: Run Ruff (linting)
+        run: ruff check --output-format=github backend/
+        
+      - name: Check code formatting (Black)
+        run: black --check backend/
+        
+      - name: Check import sorting (isort)
+        run: isort --check-only backend/
+        
+      - name: Run type checking (mypy)
+        run: mypy backend/
+
+  # Unit Tests with Coverage
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-cov pytest-asyncio httpx
+          
+      - name: Run unit tests with coverage
+        env:
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/testdb
+          REDIS_URL: redis://localhost:6379/0
+          TESTING: true
+        run: |
+          cd backend
+          pytest tests/ \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            --junitxml=junit/test-results.xml \
+            -v
+          
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report-python-${{ matrix.python-version }}
+          path: |
+            backend/coverage.xml
+            backend/htmlcov/
+            backend/junit/test-results.xml
+
+  # Integration Tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: integration_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio httpx
+          
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/integration_test
+          TESTING: true
+        run: |
+          cd backend
+          pytest tests/integration/ \
+            --junitxml=junit/integration-results.xml \
+            -v
+            
+      - name: Upload integration test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: backend/junit/integration-results.xml
+
+  # API Tests
+  api-tests:
+    runs-on: ubuntu-latest
+    needs: [integration-tests]
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: api_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-asyncio httpx
+          
+      - name: Start FastAPI application
+        env:
+          DATABASE_URL: postgresql://postgres:testpass@localhost:5432/api_test
+          TESTING: true
+        run: |
+          cd backend
+          python -c "import asyncio; import sys; sys.path.insert(0, '.'); from database import init_db; asyncio.run(init_db())"
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          sleep 5
+          
+      - name: Run API tests
+        run: |
+          cd backend
+          pytest tests/api/ \
+            --junitxml=junit/api-results.xml \
+            -v
+            
+      - name: Upload API test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: api-test-results
+          path: backend/junit/api-results.xml
+
+  # Performance Tests
+  performance-tests:
+    runs-on: ubuntu-latest
+    needs: [api-tests]
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install locust
+          
+      - name: Start FastAPI application
+        env:
+          TESTING: true
+        run: |
+          cd backend
+          uvicorn main:app --host 0.0.0.0 --port 8000 &
+          sleep 5
+          
+      - name: Run performance tests
+        run: |
+          cd backend
+          locust --headless --users 100 --spawn-rate 10 --run-time 30s \
+            --host http://localhost:8000 \
+            --html performance-report.html \
+            --csv performance-results
+            
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: |
+            backend/performance-report.html
+            backend/performance-results_*
+
+  # Docker Build Test
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: false
+          tags: econovault-api:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          
+      - name: Test Docker image
+        run: |
+          docker run --rm econovault-api:test python -c "import main; print('Import successful')"
+
+  # Deploy to Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [security-scan, code-quality, unit-tests, integration-tests, api-tests, docker-build]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Staging
+        env:
+          deploy_url: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
+          staging_health_url: ${{ secrets.STAGING_HEALTH_URL }}
+        run: |
+          curl "$deploy_url"
+          
+      - name: Wait for deployment
+        run: sleep 60
+        
+      - name: Health Check
+        env:
+          staging_health_url: ${{ secrets.STAGING_HEALTH_URL }}
+        run: |
+          max_attempts=10
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" "$staging_health_url")
+            
+            if [ $response -eq 200 ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            
+            echo "Attempt $attempt failed with status $response"
+            attempt=$((attempt + 1))
+            sleep 30
+          done
+          
+          echo "Health check failed after $max_attempts attempts"
+          exit 1
+
+  # Deploy to Production
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [security-scan, code-quality, unit-tests, integration-tests, api-tests, docker-build]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Production
+        env:
+          deploy_url: ${{ secrets.RENDER_PRODUCTION_DEPLOY_HOOK }}
+        run: |
+          curl "$deploy_url"
+          
+      - name: Wait for deployment
+        run: sleep 90
+        
+      - name: Health Check
+        id: health-check
+        env:
+          production_health_url: ${{ secrets.PRODUCTION_HEALTH_URL }}
+        run: |
+          max_attempts=15
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            response=$(curl -s -o /dev/null -w "%{http_code}" "$production_health_url")
+            
+            if [ $response -eq 200 ]; then
+              echo "Health check passed"
+              echo "healthy=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "Attempt $attempt failed with status $response"
+            attempt=$((attempt + 1))
+            sleep 30
+          done
+          
+          echo "Health check failed after $max_attempts attempts"
+          echo "healthy=false" >> $GITHUB_OUTPUT
+          exit 1
+          
+      - name: Rollback on failure
+        if: steps.health-check.outputs.healthy == 'false'
+        env:
+          rollback_url: ${{ secrets.RENDER_ROLLBACK_HOOK }}
+        run: |
+          echo "Deployment failed health check. Triggering rollback..."
+          curl -X POST "$rollback_url"
+          exit 1
+
+  # Post-deployment verification
+  post-deployment-checks:
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          
+      - name: Run post-deployment tests
+        env:
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+        run: |
+          python scripts/post_deployment_tests.py
+          
+      - name: Notify deployment status
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            EconoVault API deployment ${{ job.status }}
+            Branch: ${{ github.ref }}
+            Commit: ${{ github.sha }}
+            Author: ${{ github.actor }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

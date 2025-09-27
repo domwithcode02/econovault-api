@@ -1,0 +1,563 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Logs Integration for EconoVault API ECS Services'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: 'econovault-api'
+    Description: 'Name of the application'
+  
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+  
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    Description: 'CloudWatch log retention period in days'
+  
+  EnableContainerInsights:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable ECS Container Insights'
+  
+  EnableQueryLogging:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable Route 53 query logging'
+  
+  EnableFireLens:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable FireLens for advanced log routing'
+  
+  EnableLogMetrics:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable CloudWatch metrics from logs'
+  
+  EnableLogAlarms:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable CloudWatch alarms for log patterns'
+
+Resources:
+  # Main Application Log Group
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: Application
+
+  # FireLens Log Router Log Group
+  FireLensLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableFireLens
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/fluent-bit'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: FireLens
+
+  # CloudWatch Agent Log Group
+  CloudWatchAgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/cloudwatch-agent'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: CloudWatchAgent
+
+  # Access Log Group for Load Balancer
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/access-logs'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: Access
+
+  # Error Log Group
+  ErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/error-logs'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: Error
+
+  # Performance Log Group
+  PerformanceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/performance-logs'
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: !FindInMap [EnvironmentConfig, !Ref Environment, LogClass]
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: Performance
+
+  # KMS Key for Log Encryption
+  LogKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for ${ApplicationName} CloudWatch Logs encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action:
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # Encrypted Log Group for Sensitive Data
+  EncryptedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ApplicationName}/${Environment}/encrypted'
+      KmsKeyId: !Ref LogKMSKey
+      RetentionInDays: !Ref LogRetentionDays
+      LogGroupClass: STANDARD
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: LogType
+          Value: Encrypted
+
+  # Log Metric Filters
+  ErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: EnableLogMetrics
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '[timestamp, request_id, level=ERROR, ...]'
+      MetricTransformations:
+        - MetricNamespace: !Sub '${ApplicationName}/${Environment}'
+          MetricName: ApplicationErrors
+          MetricValue: '1'
+          DefaultValue: 0
+          Unit: Count
+
+  WarningMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: EnableLogMetrics
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterPattern: '[timestamp, request_id, level=WARN, ...]'
+      MetricTransformations:
+        - MetricNamespace: !Sub '${ApplicationName}/${Environment}'
+          MetricName: ApplicationWarnings
+          MetricValue: '1'
+          DefaultValue: 0
+          Unit: Count
+
+  PerformanceMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Condition: EnableLogMetrics
+    Properties:
+      LogGroupName: !Ref PerformanceLogGroup
+      FilterPattern: '[timestamp, request_id, latency, ...]'
+      MetricTransformations:
+        - MetricNamespace: !Sub '${ApplicationName}/${Environment}'
+          MetricName: RequestLatency
+          MetricValue: '$latency'
+          Unit: Milliseconds
+
+  # Log Insights Query Definitions
+  ErrorAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${ApplicationName}-${Environment}-error-analysis'
+      LogGroupNames:
+        - !Ref ApplicationLogGroup
+        - !Ref ErrorLogGroup
+      QueryString: |
+        fields @timestamp, @message
+        | filter @message like /ERROR/
+        | stats count() by bin(5m)
+        | sort @timestamp desc
+
+  PerformanceAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${ApplicationName}-${Environment}-performance-analysis'
+      LogGroupNames:
+        - !Ref PerformanceLogGroup
+        - !Ref ApplicationLogGroup
+      QueryString: |
+        fields @timestamp, requestId, latency, statusCode
+        | filter latency > 1000
+        | sort latency desc
+        | limit 20
+
+  TopErrorsQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${ApplicationName}-${Environment}-top-errors'
+      LogGroupNames:
+        - !Ref ApplicationLogGroup
+        - !Ref ErrorLogGroup
+      QueryString: |
+        fields @timestamp, @message
+        | filter @message like /ERROR/
+        | parse @message /(?<errorType>\w+Error):/
+        | stats count() by errorType
+        | sort count() desc
+        | limit 10
+
+  # CloudWatch Alarms for Log Metrics
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableLogAlarms
+    Properties:
+      AlarmName: !Sub '${ApplicationName}-${Environment}-high-error-rate'
+      AlarmDescription: 'Alert when application error rate is high'
+      MetricName: ApplicationErrors
+      Namespace: !Sub '${ApplicationName}/${Environment}'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableLogAlarms
+    Properties:
+      AlarmName: !Sub '${ApplicationName}-${Environment}-high-latency'
+      AlarmDescription: 'Alert when request latency is high'
+      MetricName: RequestLatency
+      Namespace: !Sub '${ApplicationName}/${Environment}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  # SNS Topic for Log Alarms
+  AlarmSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-${Environment}-log-alarms'
+      DisplayName: 'EconoVault Log Alarms'
+      KmsMasterKeyId: !Ref SNSKMSKey
+
+  # IAM Role for FireLens
+  FireLensTaskRole:
+    Type: AWS::IAM::Role
+    Condition: EnableFireLens
+    Properties:
+      RoleName: !Sub '${ApplicationName}-${Environment}-firelens-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FireLensAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !GetAtt ApplicationLogGroup.Arn
+                  - !Sub '${ApplicationLogGroup.Arn}:*'
+                  - !If [EnableFireLens, !GetAtt FireLensLogGroup.Arn, !Ref 'AWS::NoValue']
+                  - !If [EnableFireLens, !Sub '${FireLensLogGroup.Arn}:*', !Ref 'AWS::NoValue']
+
+  # Subscription Filter for Real-time Log Streaming
+  LogSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      LogGroupName: !Ref ApplicationLogGroup
+      FilterName: !Sub '${ApplicationName}-${Environment}-error-stream'
+      FilterPattern: '[timestamp, request_id, level=ERROR, ...]'
+      DestinationArn: !Ref LogDestination
+
+  # Kinesis Firehose for Log Streaming
+  LogFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub '${ApplicationName}-${Environment}-log-stream'
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt LogBucket.Arn
+        Prefix: !Sub 'ecs-logs/${ApplicationName}/${Environment}/'
+        ErrorOutputPrefix: !Sub 'ecs-logs-errors/${ApplicationName}/${Environment}/'
+        BufferingHints:
+          SizeInMBs: 5
+          IntervalInSeconds: 300
+        CompressionFormat: GZIP
+        EncryptionConfiguration:
+          NoEncryptionConfig: NoEncryption
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: !Ref FirehoseLogStream
+
+  # S3 Bucket for Log Archival
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-logs-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 2555  # 7 years
+
+  # Firehose Log Group
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/kinesisfirehose/${ApplicationName}/${Environment}'
+      RetentionInDays: 30
+
+  # Firehose Log Stream
+  FirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: !Sub '${ApplicationName}-${Environment}-firehose'
+
+  # Log Destination for Subscription Filters
+  LogDestination:
+    Type: AWS::Logs::Destination
+    Properties:
+      DestinationName: !Sub '${ApplicationName}-${Environment}-log-destination'
+      RoleArn: !GetAtt LogDestinationRole.Arn
+      TargetArn: !GetAtt LogFirehose.Arn
+
+  # IAM Role for Log Destination
+  LogDestinationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-${Environment}-log-destination-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: logs.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringLike:
+                'sts:ExternalId': !Sub '${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: FirehoseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: !GetAtt LogFirehose.Arn
+
+  # Field Index Policy for Log Insights
+  FieldIndexPolicy:
+    Type: AWS::Logs::AccountPolicy
+    Properties:
+      PolicyType: FIELD_INDEX_POLICY
+      PolicyName: !Sub '${ApplicationName}-${Environment}-field-indexes'
+      PolicyDocument: !Sub |
+        {
+          "FieldIndexPolicy": {
+            "FieldIndexes": [
+              {"FieldName": "requestId", "FieldDataType": "string"},
+              {"FieldName": "userId", "FieldDataType": "string"},
+              {"FieldName": "level", "FieldDataType": "string"},
+              {"FieldName": "latency", "FieldDataType": "number"},
+              {"FieldName": "statusCode", "FieldDataType": "number"},
+              {"FieldName": "method", "FieldDataType": "string"},
+              {"FieldName": "path", "FieldDataType": "string"}
+            ]
+          }
+        }
+
+  # DNS Query Log Group (if Route 53 query logging is enabled)
+  DNSQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableQueryLogging
+    Properties:
+      LogGroupName: !Sub '/aws/route53/${ApplicationName}/${Environment}'
+      RetentionInDays: !Ref LogRetentionDays
+
+Mappings:
+  EnvironmentConfig:
+    development:
+      LogClass: INFREQUENT_ACCESS
+      ContainerInsights: false
+    staging:
+      LogClass: INFREQUENT_ACCESS
+      ContainerInsights: true
+    production:
+      LogClass: STANDARD
+      ContainerInsights: true
+
+Conditions:
+  EnableContainerInsights: !Equals [!Ref EnableContainerInsights, 'true']
+  EnableQueryLogging: !Equals [!Ref EnableQueryLogging, 'true']
+  EnableFireLens: !Equals [!Ref EnableFireLens, 'true']
+  EnableLogMetrics: !Equals [!Ref EnableLogMetrics, 'true']
+  EnableLogAlarms: !Equals [!Ref EnableLogAlarms, 'true']
+
+Outputs:
+  ApplicationLogGroupName:
+    Description: 'Name of the main application log group'
+    Value: !Ref ApplicationLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationLogGroupName'
+  
+  ApplicationLogGroupArn:
+    Description: 'ARN of the main application log group'
+    Value: !GetAtt ApplicationLogGroup.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationLogGroupArn'
+  
+  FireLensLogGroupName:
+    Description: 'Name of the FireLens log group'
+    Value: !If [EnableFireLens, !Ref FireLensLogGroup, 'N/A']
+    Export:
+      Name: !Sub '${AWS::StackName}-FireLensLogGroupName'
+  
+  AccessLogGroupName:
+    Description: 'Name of the access log group'
+    Value: !Ref AccessLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-AccessLogGroupName'
+  
+  ErrorLogGroupName:
+    Description: 'Name of the error log group'
+    Value: !Ref ErrorLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ErrorLogGroupName'
+  
+  PerformanceLogGroupName:
+    Description: 'Name of the performance log group'
+    Value: !Ref PerformanceLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-PerformanceLogGroupName'
+  
+  EncryptedLogGroupName:
+    Description: 'Name of the encrypted log group'
+    Value: !Ref EncryptedLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-EncryptedLogGroupName'
+  
+  LogKMSKeyArn:
+    Description: 'ARN of the KMS key for log encryption'
+    Value: !GetAtt LogKMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LogKMSKeyArn'
+  
+  LogBucketName:
+    Description: 'Name of the S3 bucket for log archival'
+    Value: !Ref LogBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-LogBucketName'
+  
+  FireLensTaskRoleArn:
+    Description: 'ARN of the FireLens task role'
+    Value: !If [EnableFireLens, !Ref FireLensTaskRole, 'N/A']
+    Export:
+      Name: !Sub '${AWS::StackName}-FireLensTaskRoleArn'
+  
+  AlarmTopicArn:
+    Description: 'ARN of the SNS topic for log alarms'
+    Value: !Ref AlarmSNSTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmTopicArn'

@@ -1,0 +1,498 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Auto Scaling Policies for EconoVault API ECS Service'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: 'econovault-api'
+    Description: 'Name of the application'
+  
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+  
+  ECSCluster:
+    Type: String
+    Default: 'EconoVault-Cluster1'
+    Description: 'ECS cluster name'
+  
+  ECSService:
+    Type: String
+    Default: 'econovault-api-service'
+    Description: 'ECS service name'
+  
+  MinCapacity:
+    Type: Number
+    Default: 2
+    Description: 'Minimum number of tasks'
+  
+  MaxCapacity:
+    Type: Number
+    Default: 20
+    Description: 'Maximum number of tasks'
+  
+  TargetCPUUtilization:
+    Type: Number
+    Default: 60
+    Description: 'Target CPU utilization percentage'
+  
+  TargetMemoryUtilization:
+    Type: Number
+    Default: 70
+    Description: 'Target memory utilization percentage'
+  
+  ScaleOutCooldown:
+    Type: Number
+    Default: 60
+    Description: 'Cooldown period for scale-out (seconds)'
+  
+  ScaleInCooldown:
+    Type: Number
+    Default: 300
+    Description: 'Cooldown period for scale-in (seconds)'
+  
+  EnablePredictiveScaling:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable predictive scaling'
+  
+  EnableScheduledScaling:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable scheduled scaling'
+  
+  BusinessHoursStart:
+    Type: String
+    Default: '09:00'
+    Description: 'Business hours start time (HH:MM)'
+  
+  BusinessHoursEnd:
+    Type: String
+    Default: '17:00'
+    Description: 'Business hours end time (HH:MM)'
+  
+  TimeZone:
+    Type: String
+    Default: 'America/Los_Angeles'
+    Description: 'Time zone for scheduled scaling'
+
+Resources:
+  # Scalable Target - Defines the ECS service as scalable
+  ECSScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: !Ref MaxCapacity
+      MinCapacity: !Ref MinCapacity
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService}'
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      SuspendedState:
+        DynamicScalingInSuspended: false
+        DynamicScalingOutSuspended: false
+        ScheduledScalingSuspended: false
+
+  # Target Tracking Policy - CPU Utilization
+  CPUTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-cpu-target-tracking'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref TargetCPUUtilization
+        ScaleInCooldown: !Ref ScaleInCooldown
+        ScaleOutCooldown: !Ref ScaleOutCooldown
+        DisableScaleIn: false
+
+  # Target Tracking Policy - Memory Utilization
+  MemoryTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-memory-target-tracking'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref TargetMemoryUtilization
+        ScaleInCooldown: !Ref ScaleInCooldown
+        ScaleOutCooldown: !Ref ScaleOutCooldown
+        DisableScaleIn: false
+
+  # Step Scaling Policy - Scale Out (Aggressive)
+  StepScaleOutPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-step-scale-out'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: !Ref ScaleOutCooldown
+        MinAdjustmentMagnitude: 1
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            MetricIntervalUpperBound: 10
+            ScalingAdjustment: 25
+          - MetricIntervalLowerBound: 10
+            MetricIntervalUpperBound: 25
+            ScalingAdjustment: 50
+          - MetricIntervalLowerBound: 25
+            MetricIntervalUpperBound: 50
+            ScalingAdjustment: 100
+          - MetricIntervalLowerBound: 50
+            ScalingAdjustment: 200
+
+  # Step Scaling Policy - Scale In (Conservative)
+  StepScaleInPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-step-scale-in'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: !Ref ScaleInCooldown
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalUpperBound: 0
+            MetricIntervalLowerBound: -10
+            ScalingAdjustment: -1
+          - MetricIntervalUpperBound: -10
+            MetricIntervalLowerBound: -20
+            ScalingAdjustment: -2
+          - MetricIntervalUpperBound: -20
+            MetricIntervalLowerBound: -30
+            ScalingAdjustment: -3
+          - MetricIntervalUpperBound: -30
+            ScalingAdjustment: -4
+
+  # Predictive Scaling Policy
+  PredictiveScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: EnablePredictiveScaling
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-predictive-scaling'
+      PolicyType: PredictiveScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      PredictiveScalingPolicyConfiguration:
+        MetricSpecifications:
+          - TargetValue: !Ref TargetCPUUtilization
+            PredefinedMetricPairSpecification:
+              PredefinedMetricType: ECSServiceCPUUtilization
+        SchedulingBufferTime: 3600
+        MaxCapacityBreachBehavior: HonorMaxCapacity
+        Mode: ForecastAndScale
+
+  # Custom Metric Scaling - Request Count per Target
+  RequestCountScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-request-count-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        CustomizedMetricSpecification:
+          MetricName: RequestCountPerTarget
+          Namespace: AWS/ApplicationELB
+          Dimensions:
+            - Name: TargetGroup
+              Value: !Ref TargetGroup
+            - Name: LoadBalancer
+              Value: !Ref LoadBalancer
+          Statistic: Average
+        TargetValue: 1000
+        ScaleInCooldown: !Ref ScaleInCooldown
+        ScaleOutCooldown: !Ref ScaleOutCooldown
+
+  # Multi-Metric Scaling Policy - Composite Health Score
+  CompositeHealthScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub '${ApplicationName}-${Environment}-composite-health-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        CustomizedMetricSpecification:
+          Metrics:
+            - Id: cpu
+              Label: CPU Utilization
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  MetricName: CPUUtilization
+                  Namespace: AWS/ECS
+                  Dimensions:
+                    - Name: ClusterName
+                      Value: !Ref ECSCluster
+                    - Name: ServiceName
+                      Value: !Ref ECSService
+                Stat: Average
+            - Id: memory
+              Label: Memory Utilization
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  MetricName: MemoryUtilization
+                  Namespace: AWS/ECS
+                  Dimensions:
+                    - Name: ClusterName
+                      Value: !Ref ECSCluster
+                    - Name: ServiceName
+                      Value: !Ref ECSService
+                Stat: Average
+            - Id: errors
+              Label: Error Rate
+              ReturnData: false
+              MetricStat:
+                Metric:
+                  MetricName: HTTPCode_Target_5XX_Count
+                  Namespace: AWS/ApplicationELB
+                  Dimensions:
+                    - Name: TargetGroup
+                      Value: !Ref TargetGroup
+                    - Name: LoadBalancer
+                      Value: !Ref LoadBalancer
+                Stat: Sum
+            - Id: health_score
+              Label: Composite Health Score
+              Expression: '(cpu * 0.4) + (memory * 0.3) + (errors * 0.3)'
+              ReturnData: true
+        TargetValue: 60
+        ScaleInCooldown: !Ref ScaleInCooldown
+        ScaleOutCooldown: !Ref ScaleOutCooldown
+
+  # Scheduled Scaling - Business Hours
+  BusinessHoursScaleUp:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Condition: EnableScheduledScaling
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService}'
+      ScheduledActionName: !Sub '${ApplicationName}-${Environment}-business-hours-scale-up'
+      Schedule: 'cron(0 9 ? * MON-FRI *)'
+      Timezone: !Ref TimeZone
+      StartTime: '2024-01-01T00:00:00'
+      EndTime: '2024-12-31T23:59:59'
+      ScalableTargetAction:
+        MinCapacity: 4
+        MaxCapacity: !Ref MaxCapacity
+
+  BusinessHoursScaleDown:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Condition: EnableScheduledScaling
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService}'
+      ScheduledActionName: !Sub '${ApplicationName}-${Environment}-business-hours-scale-down'
+      Schedule: 'cron(0 18 ? * MON-FRI *)'
+      Timezone: !Ref TimeZone
+      StartTime: '2024-01-01T00:00:00'
+      EndTime: '2024-12-31T23:59:59'
+      ScalableTargetAction:
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: 6
+
+  # Weekend Scaling
+  WeekendScaleDown:
+    Type: AWS::ApplicationAutoScaling::ScheduledAction
+    Condition: EnableScheduledScaling
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub 'service/${ECSCluster}/${ECSService}'
+      ScheduledActionName: !Sub '${ApplicationName}-${Environment}-weekend-scale-down'
+      Schedule: 'cron(0 0 ? * SAT-SUN *)'
+      Timezone: !Ref TimeZone
+      StartTime: '2024-01-01T00:00:00'
+      EndTime: '2024-12-31T23:59:59'
+      ScalableTargetAction:
+        MinCapacity: 1
+        MaxCapacity: 4
+
+  # CloudWatch Alarms for High CPU
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ApplicationName}-${Environment}-high-cpu'
+      AlarmDescription: 'Alert when CPU utilization is high'
+      MetricName: CPUUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !Ref ECSService
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+
+  # CloudWatch Alarms for High Memory
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ApplicationName}-${Environment}-high-memory'
+      AlarmDescription: 'Alert when memory utilization is high'
+      MetricName: MemoryUtilization
+      Namespace: AWS/ECS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !Ref ECSService
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+
+  # CloudWatch Alarms for Service Health
+  ServiceHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ApplicationName}-${Environment}-service-health'
+      AlarmDescription: 'Alert when running task count is low'
+      MetricName: RunningTaskCount
+      Namespace: ECS/ContainerInsights
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref MinCapacity
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref ECSCluster
+        - Name: ServiceName
+          Value: !Ref ECSService
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+
+  # SNS Topic for Alarms
+  AlarmSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ApplicationName}-${Environment}-scaling-alerts'
+      DisplayName: 'EconoVault Auto Scaling Alerts'
+      KmsMasterKeyId: !Ref SNSKMSKey
+
+  # KMS Key for SNS Encryption
+  SNSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for SNS topic encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # IAM Role for Auto Scaling
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-${Environment}-auto-scaling-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSServiceRolePolicy
+      Policies:
+        - PolicyName: CloudWatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                Resource: '*'
+
+Parameters:
+  TargetGroup:
+    Type: String
+    Default: 'target-group-id'
+    Description: 'Target group ID for custom metrics'
+  
+  LoadBalancer:
+    Type: String
+    Default: 'load-balancer-id'
+    Description: 'Load balancer ID for custom metrics'
+
+Conditions:
+  EnablePredictiveScaling: !Equals [!Ref EnablePredictiveScaling, 'true']
+  EnableScheduledScaling: !Equals [!Ref EnableScheduledScaling, 'true']
+
+Outputs:
+  ScalableTargetId:
+    Description: 'ID of the scalable target'
+    Value: !Ref ECSScalableTarget
+    Export:
+      Name: !Sub '${AWS::StackName}-ScalableTargetId'
+  
+  CPUTargetPolicyArn:
+    Description: 'ARN of the CPU target tracking policy'
+    Value: !Ref CPUTargetTrackingPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-CPUTargetPolicyArn'
+  
+  MemoryTargetPolicyArn:
+    Description: 'ARN of the memory target tracking policy'
+    Value: !Ref MemoryTargetTrackingPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-MemoryTargetPolicyArn'
+  
+  StepScaleOutPolicyArn:
+    Description: 'ARN of the step scale-out policy'
+    Value: !Ref StepScaleOutPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-StepScaleOutPolicyArn'
+  
+  StepScaleInPolicyArn:
+    Description: 'ARN of the step scale-in policy'
+    Value: !Ref StepScaleInPolicy
+    Export:
+      Name: !Sub '${AWS::StackName}-StepScaleInPolicyArn'
+  
+  PredictivePolicyArn:
+    Description: 'ARN of the predictive scaling policy'
+    Value: !If [EnablePredictiveScaling, !Ref PredictiveScalingPolicy, 'N/A']
+    Export:
+      Name: !Sub '${AWS::StackName}-PredictivePolicyArn'
+  
+  AlarmTopicArn:
+    Description: 'ARN of the SNS topic for scaling alarms'
+    Value: !Ref AlarmSNSTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmTopicArn'

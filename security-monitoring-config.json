@@ -1,0 +1,283 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "EconoVault API - Security Monitoring and Alerting Configuration",
+  "Parameters": {
+    "Environment": {
+      "Type": "String",
+      "Description": "Environment name (dev/staging/prod)",
+      "Default": "prod",
+      "AllowedValues": ["dev", "staging", "prod"]
+    },
+    "NotificationEmail": {
+      "Type": "String",
+      "Description": "Email address for security notifications",
+      "Default": "security-team@econovault.com"
+    }
+  },
+  "Resources": {
+    "SecurityLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": { "Fn::Sub": "/ecs/econovault-api-${Environment}/security" },
+        "RetentionInDays": 365,
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          },
+          {
+            "Key": "Project",
+            "Value": "EconoVault"
+          },
+          {
+            "Key": "LogType",
+            "Value": "Security"
+          }
+        ]
+      }
+    },
+    "AuditLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": { "Fn::Sub": "/ecs/econovault-api-${Environment}/audit" },
+        "RetentionInDays": 2555, 
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          },
+          {
+            "Key": "Project",
+            "Value": "EconoVault"
+          },
+          {
+            "Key": "LogType",
+            "Value": "Audit"
+          }
+        ]
+      }
+    },
+    "SecurityDashboard": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Properties": {
+        "DashboardName": { "Fn::Sub": "EconoVault-API-${Environment}-Security-Dashboard" },
+        "DashboardBody": {
+          "Fn::Sub": {
+            "widgets": [
+              {
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    ["AWS/WAFV2", "BlockedRequests", "WebACL", { "Fn::GetAtt": ["WebACL", "Name"] }, "Rule", "BlockCommonWebAttacks", { "id": "m1" }],
+                    ["AWS/WAFV2", "BlockedRequests", "WebACL", { "Fn::GetAtt": ["WebACL", "Name"] }, "Rule", "BlockSQLInjection", { "id": "m2" }],
+                    ["AWS/WAFV2", "BlockedRequests", "WebACL", { "Fn::GetAtt": ["WebACL", "Name"] }, "Rule", "BlockXSSAttacks", { "id": "m3" }]
+                  ],
+                  "period": 300,
+                  "stat": "Sum",
+                  "region": "us-west-1",
+                  "title": "WAF Blocked Requests by Rule"
+                }
+              },
+              {
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    ["AWS/ECS", "CPUUtilization", "ClusterName", "EconoVault-Cluster1", "ServiceName", "EconoVault-API-Service", { "id": "m4" }]
+                  ],
+                  "period": 60,
+                  "stat": "Average",
+                  "region": "us-west-1",
+                  "title": "ECS Service CPU Utilization"
+                }
+              },
+              {
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "EconoVault-ALB", { "id": "m5" }],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_4XX_Count", "LoadBalancer", "EconoVault-ALB", { "id": "m6" }]
+                  ],
+                  "period": 300,
+                  "stat": "Sum",
+                  "region": "us-west-1",
+                  "title": "ALB Target 4XX/5XX Errors"
+                }
+              },
+              {
+                "type": "log",
+                "properties": {
+                  "query": "SOURCE '/ecs/econovault-api-${Environment}/security' | fields @timestamp, @message | filter level = 'ERROR' | stats count() as errorCount by bin(5m)",
+                  "region": "us-west-1",
+                  "title": "Security Error Logs (5m intervals)",
+                  "view": "timeSeries"
+                }
+              },
+              {
+                "type": "log",
+                "properties": {
+                  "query": "SOURCE '/ecs/econovault-api-${Environment}/audit' | fields @timestamp, event_type, action, result | stats count() as totalCount by event_type, action | filter result = 'failure'",
+                  "region": "us-west-1",
+                  "title": "Failed Audit Events by Type",
+                  "view": "table"
+                }
+              },
+              {
+                "type": "metric",
+                "properties": {
+                  "metrics": [
+                    ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "econovault-db", { "id": "m7" }],
+                    ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "econovault-db", { "id": "m8" }]
+                  ],
+                  "period": 60,
+                  "stat": "Average",
+                  "region": "us-west-1",
+                  "title": "RDS Database Metrics"
+                }
+              }
+            ],
+            "period": "300"
+          }
+        }
+      }
+    },
+    "HighErrorRateAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": { "Fn::Sub": "EconoVault-API-${Environment}-HighErrorRate" },
+        "AlarmDescription": "Alarm when API error rate exceeds 5%",
+        "Namespace": "AWS/ApplicationELB",
+        "MetricName": "HTTPCode_Target_5XX_Count",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": "EconoVault-ALB"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Threshold": 10,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          { "Ref": "SecurityAlarmTopic" }
+        ]
+      }
+    },
+    "SecurityLogErrorAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": { "Fn::Sub": "EconoVault-API-${Environment}-SecurityLogErrors" },
+        "AlarmDescription": "Alarm when security logs contain errors",
+        "Namespace": "AWS/Logs",
+        "MetricName": "IncomingLogEvents",
+        "Dimensions": [
+          {
+            "Name": "LogGroupName",
+            "Value": { "Ref": "SecurityLogGroup" }
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "Threshold": 0,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          { "Ref": "SecurityAlarmTopic" }
+        ]
+      }
+    },
+    "UnauthorizedAccessAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": { "Fn::Sub": "EconoVault-API-${Environment}-UnauthorizedAccess" },
+        "AlarmDescription": "Alarm when unauthorized access attempts detected",
+        "Namespace": "AWS/ApplicationELB",
+        "MetricName": "HTTPCode_Target_4XX_Count",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": "EconoVault-ALB"
+          }
+        ],
+        "Statistic": "Sum",
+        "Period": 300,
+        "EvaluationPeriods": 3,
+        "Threshold": 50,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          { "Ref": "SecurityAlarmTopic" }
+        ]
+      }
+    },
+    "DatabaseCPUAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmName": { "Fn::Sub": "EconoVault-API-${Environment}-DatabaseCPU" },
+        "AlarmDescription": "Alarm when RDS CPU utilization exceeds 80%",
+        "Namespace": "AWS/RDS",
+        "MetricName": "CPUUtilization",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": "econovault-db"
+          }
+        ],
+        "Statistic": "Average",
+        "Period": 300,
+        "EvaluationPeriods": 3,
+        "Threshold": 80,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          { "Ref": "SecurityAlarmTopic" }
+        ]
+      }
+    },
+    "SecurityAlarmTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "TopicName": { "Fn::Sub": "EconoVault-API-${Environment}-Security-Alerts" },
+        "DisplayName": "EconoVault API Security Alerts",
+        "Tags": [
+          {
+            "Key": "Environment",
+            "Value": { "Ref": "Environment" }
+          },
+          {
+            "Key": "Project",
+            "Value": "EconoVault"
+          }
+        ]
+      }
+    },
+    "SecurityAlarmSubscription": {
+      "Type": "AWS::SNS::Subscription",
+      "Properties": {
+        "Protocol": "email",
+        "TopicArn": { "Ref": "SecurityAlarmTopic" },
+        "Endpoint": { "Ref": "NotificationEmail" }
+      }
+    }
+  },
+  "Outputs": {
+    "SecurityDashboardUrl": {
+      "Description": "URL of the CloudWatch Security Dashboard",
+      "Value": { "Fn::Sub": "https://console.aws.amazon.com/cloudwatch/home?region=us-west-1#dashboards:name=EconoVault-API-${Environment}-Security-Dashboard" }
+    },
+    "SecurityLogGroupName": {
+      "Description": "Name of the security log group",
+      "Value": { "Ref": "SecurityLogGroup" }
+    },
+    "AuditLogGroupName": {
+      "Description": "Name of the audit log group",
+      "Value": { "Ref": "AuditLogGroup" }
+    },
+    "SecurityAlarmTopicArn": {
+      "Description": "ARN of the security alarm SNS topic",
+      "Value": { "Ref": "SecurityAlarmTopic" }
+    }
+  }
+}

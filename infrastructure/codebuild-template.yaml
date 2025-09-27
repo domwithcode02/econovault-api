@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Financial-grade CodeBuild project for EconoVault API'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: econovault-api
+    Description: Name of the CodeBuild project
+  
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+  
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for network isolation
+  
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for CodeBuild
+
+Resources:
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}'
+      Description: !Sub 'CodeBuild project for ${Environment} environment'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ENVIRONMENT
+            Value: !Ref Environment
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: ECR_REPOSITORY_URI
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}'
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+        Certificate: !Ref BuildCertificate
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      TimeoutInMinutes: 30
+      EncryptionKey: !Ref KMSKey
+      VpcConfig:
+        VpcId: !Ref VPCId
+        Subnets: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref CodeBuildSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: EconoVault
+        - Key: Compliance
+          Value: Financial
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-codebuild-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildManagedPolicy
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: '*'
+        - PolicyName: ParameterStoreAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}/*'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}/*'
+        - PolicyName: KMSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt KMSKey.Arn
+
+  CodeBuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for CodeBuild
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for CodeBuild encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow CodeBuild to use the key
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  BuildCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub 'build-${Environment}.internal'
+      ValidationMethod: DNS
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  CodeBuildProjectName:
+    Description: Name of the CodeBuild project
+    Value: !Ref CodeBuildProject
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CodeBuildProject'
+  
+  CodeBuildServiceRoleArn:
+    Description: ARN of the CodeBuild service role
+    Value: !GetAtt CodeBuildServiceRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CodeBuildRoleArn'

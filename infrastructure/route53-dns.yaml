@@ -1,0 +1,389 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Route 53 DNS Routing Configuration for EconoVault API'
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: 'econovault.com'
+    Description: 'Root domain name'
+  
+  SubdomainPrefix:
+    Type: String
+    Default: 'api'
+    Description: 'Subdomain prefix for the API'
+  
+  ApplicationLoadBalancerDNS:
+    Type: String
+    Description: 'DNS name of the Application Load Balancer'
+    Default: 'EconoVault-ALB-1841275054.us-west-1.elb.amazonaws.com'
+  
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+  
+  EnableHealthChecks:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable Route 53 health checks'
+  
+  HealthCheckPath:
+    Type: String
+    Default: '/health'
+    Description: 'Health check endpoint path'
+
+Resources:
+  # Public Hosted Zone
+  PublicHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub 'Public hosted zone for ${DomainName}'
+        PrivateZone: false
+      HostedZoneTags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Private Hosted Zone for Internal Services
+  PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub 'internal.${DomainName}'
+      HostedZoneConfig:
+        Comment: !Sub 'Private hosted zone for internal ${DomainName} services'
+        PrivateZone: true
+      VPCs:
+        - VPCRegion: !Ref AWS::Region
+          VPCId: !Ref VPCId
+      HostedZoneTags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ZoneType
+          Value: Private
+
+  # API A Record - Primary Route to ALB
+  APIARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub '${SubdomainPrefix}.${DomainName}'
+      Type: A
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+
+  # API AAAA Record (IPv6) - Primary Route to ALB
+  APIAAAARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub '${SubdomainPrefix}.${DomainName}'
+      Type: AAAA
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+
+  # WWW CNAME Record
+  WWWCNameRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'www.${DomainName}'
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !Sub '${SubdomainPrefix}.${DomainName}'
+
+  # Health Check for API Endpoint
+  APIHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Condition: EnableHealthChecks
+    Properties:
+      Type: HTTPS
+      ResourcePath: !Ref HealthCheckPath
+      FullyQualifiedDomainName: !Sub '${SubdomainPrefix}.${DomainName}'
+      Port: 443
+      RequestInterval: 30
+      FailureThreshold: 3
+      EnableSNI: true
+      Regions:
+        - us-west-1
+        - us-east-1
+      Tags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Calculated Health Check for Multiple Endpoints
+  CompositeHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Condition: EnableHealthChecks
+    Properties:
+      Type: CALCULATED
+      HealthThreshold: 2
+      ChildHealthChecks:
+        - !Ref APIHealthCheck
+        - !Ref DatabaseHealthCheck
+      Tags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Type
+          Value: Composite
+
+  # Database Health Check
+  DatabaseHealthCheck:
+    Type: AWS::Route53::HealthCheck
+    Condition: EnableHealthChecks
+    Properties:
+      Type: TCP
+      IPAddress: !Ref DatabaseIP
+      Port: 5432
+      RequestInterval: 60
+      FailureThreshold: 3
+      Tags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Component
+          Value: Database
+
+  # Latency-Based Routing for Multi-Region
+  LatencyAPIRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub '${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: !Sub 'Primary-${AWS::Region}'
+      Region: !Ref AWS::Region
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+      HealthCheckId: !If [EnableHealthChecks, !Ref APIHealthCheck, !Ref 'AWS::NoValue']
+
+  # Geolocation Routing for Compliance
+  GeolocationEURecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'eu.${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: 'EU-Users'
+      GeoLocation:
+        ContinentCode: EU
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+
+  # Weighted Routing for Blue-Green Deployment
+  BlueEnvironmentRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'blue.${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: 'Blue-Environment'
+      Weight: 90
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+
+  GreenEnvironmentRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'green.${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: 'Green-Environment'
+      Weight: 10
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: !Ref EnableHealthChecks
+
+  # Failover Routing Configuration
+  PrimaryFailoverRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'failover.${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: 'Primary'
+      Failover: PRIMARY
+      AliasTarget:
+        DNSName: !Ref ApplicationLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: true
+      HealthCheckId: !If [EnableHealthChecks, !Ref APIHealthCheck, !Ref 'AWS::NoValue']
+
+  SecondaryFailoverRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Sub 'failover.${SubdomainPrefix}.${DomainName}'
+      Type: A
+      SetIdentifier: 'Secondary'
+      Failover: SECONDARY
+      AliasTarget:
+        DNSName: !Ref SecondaryLoadBalancerDNS
+        HostedZoneId: !GetAtt ALBHostedZoneID.Value
+        EvaluateTargetHealth: true
+
+  # TXT Records for Domain Verification
+  DomainVerificationTXT:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Ref DomainName
+      Type: TXT
+      TTL: 300
+      ResourceRecords:
+        - '"v=spf1 include:_spf.google.com ~all"'
+        - '"google-site-verification=1234567890abcdef"'
+
+  # MX Records for Email
+  MXRecords:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Ref DomainName
+      Type: MX
+      TTL: 3600
+      ResourceRecords:
+        - '10 aspmx.l.google.com'
+        - '20 alt1.aspmx.l.google.com'
+        - '20 alt2.aspmx.l.google.com'
+        - '30 aspmx2.googlemail.com'
+        - '30 aspmx3.googlemail.com'
+
+  # Query Logging Configuration
+  QueryLoggingConfig:
+    Type: AWS::Route53::QueryLoggingConfig
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      CloudWatchLogsLogGroupArn: !GetAtt DNSQueryLogGroup.Arn
+
+  # CloudWatch Log Group for DNS Queries
+  DNSQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/route53/${DomainName}'
+      RetentionInDays: 30
+
+  # DNS Firewall Rule Group
+  DNSFirewallRuleGroup:
+    Type: AWS::Route53Resolver::FirewallRuleGroup
+    Properties:
+      Name: !Sub 'econovault-dns-firewall-${Environment}'
+      FirewallRules:
+        - Name: BlockMalwareDomains
+          Priority: 100
+          Action: BLOCK
+          BlockResponse: NODATA
+          FirewallDomainListId: !Ref MalwareDomainList
+        - Name: BlockPhishingDomains
+          Priority: 200
+          Action: BLOCK
+          BlockResponse: NXDOMAIN
+          FirewallDomainListId: !Ref PhishingDomainList
+
+  # Managed Domain Lists
+  MalwareDomainList:
+    Type: AWS::Route53Resolver::FirewallDomainList
+    Properties:
+      Name: !Sub 'malware-domains-${Environment}'
+      Domains:
+        - '*.malware.example.com'
+        - '*.phishing.example.net'
+        - 'suspicious-domain.com'
+
+  PhishingDomainList:
+    Type: AWS::Route53Resolver::FirewallDomainList
+    Properties:
+      Name: !Sub 'phishing-domains-${Environment}'
+      Domains:
+        - '*.phishing.example.com'
+        - 'fake-bank.com'
+        - 'scam-website.net'
+
+Parameters:
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC ID for private hosted zone'
+  
+  DatabaseIP:
+    Type: String
+    Default: '10.0.1.10'
+    Description: 'IP address of the database server'
+  
+  SecondaryLoadBalancerDNS:
+    Type: String
+    Default: 'backup-alb.us-west-1.elb.amazonaws.com'
+    Description: 'DNS name of the secondary load balancer'
+
+Conditions:
+  EnableHealthChecks: !Equals [!Ref EnableHealthChecks, 'true']
+
+Mappings:
+  ALBHostedZoneIDs:
+    us-west-1:
+      ZoneID: 'Z1H1FL5HABSF5'
+    us-east-1:
+      ZoneID: 'Z35SXDOTRQ7X7K'
+    us-west-2:
+      ZoneID: 'Z1H1FL5HABSF5'
+    eu-west-1:
+      ZoneID: 'Z32O12XQLNTSW2'
+
+Resources:
+  ALBHostedZoneID:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: '/econovault/alb-hosted-zone-id'
+      Type: String
+      Value: !FindInMap [ALBHostedZoneIDs, !Ref AWS::Region, ZoneID]
+
+Outputs:
+  PublicHostedZoneId:
+    Description: 'ID of the public hosted zone'
+    Value: !Ref PublicHostedZone
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicHostedZoneId'
+  
+  PrivateHostedZoneId:
+    Description: 'ID of the private hosted zone'
+    Value: !Ref PrivateHostedZone
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateHostedZoneId'
+  
+  NameServers:
+    Description: 'Name servers for the public hosted zone'
+    Value: !GetAtt PublicHostedZone.NameServers
+    Export:
+      Name: !Sub '${AWS::StackName}-NameServers'
+  
+  APIEndpoint:
+    Description: 'API endpoint URL'
+    Value: !Sub 'https://${SubdomainPrefix}.${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-APIEndpoint'
+  
+  HealthCheckId:
+    Description: 'ID of the health check'
+    Value: !If [EnableHealthChecks, !Ref APIHealthCheck, 'N/A']
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthCheckId'

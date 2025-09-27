@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SSL/TLS Certificate Configuration for EconoVault API'
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: 'api.econovault.com'
+    Description: 'Domain name for the SSL certificate'
+  
+  AlternativeNames:
+    Type: CommaDelimitedList
+    Default: 'www.api.econovault.com,api.econovault.io'
+    Description: 'Alternative domain names for the certificate'
+  
+  ValidationMethod:
+    Type: String
+    Default: 'DNS'
+    AllowedValues: ['DNS', 'EMAIL']
+    Description: 'Certificate validation method'
+  
+  CertificateType:
+    Type: String
+    Default: 'PUBLIC'
+    AllowedValues: ['PUBLIC', 'PRIVATE']
+    Description: 'Type of certificate (public or private)'
+
+Resources:
+  # SSL Certificate for Application Load Balancer
+  ApplicationCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames: !Ref AlternativeNames
+      ValidationMethod: !Ref ValidationMethod
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Application
+          Value: EconoVaultAPI
+        - Key: Environment
+          Value: Production
+        - Key: Purpose
+          Value: SSL-TLS-Certificate
+    
+  # Private Certificate Authority (if private certificates needed)
+  PrivateCertificateAuthority:
+    Type: AWS::ACMPCA::CertificateAuthority
+    Condition: CreatePrivateCA
+    Properties:
+      Type: ROOT
+      KeyAlgorithm: RSA_2048
+      SigningAlgorithm: SHA256WITHRSA
+      Subject:
+        Country: US
+        Organization: EconoVault
+        OrganizationalUnit: Engineering
+        CommonName: !Sub '${DomainName}-CA'
+      RevocationConfiguration:
+        CrlConfiguration:
+          Enabled: true
+          ExpirationInDays: 7
+          S3BucketName: !Ref CABucket
+    
+  # S3 Bucket for CA CRL (Certificate Revocation List)
+  CABucket:
+    Type: AWS::S3::Bucket
+    Condition: CreatePrivateCA
+    Properties:
+      BucketName: !Sub 'econovault-ca-crl-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldCRLFiles
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # CloudWatch Alarm for Certificate Expiration
+  CertificateExpirationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${DomainName}-Certificate-Expiration-Alarm'
+      AlarmDescription: 'Alert when SSL certificate is approaching expiration'
+      MetricName: DaysToExpiry
+      Namespace: AWS/CertificateManager
+      Statistic: Average
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 30
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: CertificateArn
+          Value: !Ref ApplicationCertificate
+      AlarmActions:
+        - !Ref AlarmSNSTopic
+      OKActions:
+        - !Ref AlarmSNSTopic
+
+  # SNS Topic for Certificate Alerts
+  AlarmSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'econovault-certificate-alerts-${AWS::Region}'
+      DisplayName: 'EconoVault Certificate Alerts'
+      KmsMasterKeyId: !Ref SNSKMSKey
+
+  # KMS Key for SNS Encryption
+  SNSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for SNS topic encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:GenerateDataKey*'
+              - 'kms:Decrypt'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+
+  # Route 53 DNS Validation Records (if using DNS validation)
+  DNSValidationRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: UseDNSValidation
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '_${ApplicationCertificate}.acm-validations.aws'
+      Type: CNAME
+      TTL: 60
+      ResourceRecords:
+        - !GetAtt ApplicationCertificate.CertificateDNSValidationRecordValue
+
+Conditions:
+  CreatePrivateCA: !Equals [!Ref CertificateType, 'PRIVATE']
+  UseDNSValidation: !Equals [!Ref ValidationMethod, 'DNS']
+
+Outputs:
+  CertificateArn:
+    Description: 'ARN of the SSL certificate'
+    Value: !Ref ApplicationCertificate
+    Export:
+      Name: !Sub '${AWS::StackName}-CertificateArn'
+  
+  CertificateId:
+    Description: 'ID of the SSL certificate'
+    Value: !Ref ApplicationCertificate
+    Export:
+      Name: !Sub '${AWS::StackName}-CertificateId'
+  
+  CertificateDNSName:
+    Description: 'DNS name of the certificate'
+    Value: !GetAtt ApplicationCertificate.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-CertificateDNSName'
+  
+  PrivateCAArn:
+    Description: 'ARN of the private certificate authority'
+    Value: !If [CreatePrivateCA, !Ref PrivateCertificateAuthority, 'N/A']
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateCAArn'
+  
+  AlarmTopicArn:
+    Description: 'ARN of the SNS topic for certificate alerts'
+    Value: !Ref AlarmSNSTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmTopicArn'

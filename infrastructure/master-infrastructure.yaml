@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Master Infrastructure Stack for EconoVault API - SSL, DNS, ECS, Auto Scaling, CloudWatch'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: 'econovault-api'
+    Description: 'Name of the application'
+  
+  Environment:
+    Type: String
+    Default: 'production'
+    AllowedValues: ['development', 'staging', 'production']
+    Description: 'Environment name'
+  
+  DomainName:
+    Type: String
+    Default: 'api.econovault.com'
+    Description: 'Domain name for the application'
+  
+  CertificateValidationMethod:
+    Type: String
+    Default: 'DNS'
+    AllowedValues: ['DNS', 'EMAIL']
+    Description: 'SSL certificate validation method'
+  
+  ImageUri:
+    Type: String
+    Description: 'URI of the container image in ECR'
+    Default: '123456789012.dkr.ecr.us-west-1.amazonaws.com/econovault-api:latest'
+  
+  ECSCluster:
+    Type: String
+    Default: 'EconoVault-Cluster1'
+    Description: 'ECS cluster name'
+  
+  ECSService:
+    Type: String
+    Default: 'econovault-api-service'
+    Description: 'ECS service name'
+  
+  ApplicationLoadBalancerDNS:
+    Type: String
+    Description: 'DNS name of the Application Load Balancer'
+    Default: 'EconoVault-ALB-1841275054.us-west-1.elb.amazonaws.com'
+  
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'VPC ID for infrastructure'
+  
+  DatabaseHost:
+    Type: String
+    Default: 'econovault-db.cx8k6c0mwva4.us-west-1.rds.amazonaws.com'
+    Description: 'Database host endpoint'
+  
+  RedisEndpoint:
+    Type: String
+    Default: 'redis-endpoint:6379'
+    Description: 'Redis cache endpoint'
+
+Resources:
+  # SSL Certificate Stack
+  SSLCertificateStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './ssl-certificate.yaml'
+      Parameters:
+        DomainName: !Ref DomainName
+        ValidationMethod: !Ref CertificateValidationMethod
+        AlternativeNames: !Sub 'www.${DomainName},api.econovault.io'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: SSL-Certificate
+
+  # Route 53 DNS Stack
+  Route53DNSStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './route53-dns.yaml'
+      Parameters:
+        DomainName: 'econovault.com'
+        SubdomainPrefix: 'api'
+        ApplicationLoadBalancerDNS: !Ref ApplicationLoadBalancerDNS
+        Environment: !Ref Environment
+        VPCId: !Ref VPCId
+        EnableHealthChecks: 'true'
+        HealthCheckPath: '/health'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: DNS-Routing
+
+  # ECS Task Definitions Stack
+  ECSTaskDefinitionsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './ecs-task-definitions.yaml'
+      Parameters:
+        ApplicationName: !Ref ApplicationName
+        Environment: !Ref Environment
+        ImageUri: !Ref ImageUri
+        ContainerPort: '8000'
+        TaskCPU: '1024'
+        TaskMemory: '2048'
+        ContainerCPU: '512'
+        ContainerMemory: '1024'
+        LogRetentionDays: '30'
+        HealthCheckPath: '/health'
+        DatabaseHost: !Ref DatabaseHost
+        RedisEndpoint: !Ref RedisEndpoint
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: ECS-TaskDefinitions
+
+  # Auto Scaling Policies Stack
+  AutoScalingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './auto-scaling-policies.yaml'
+      Parameters:
+        ApplicationName: !Ref ApplicationName
+        Environment: !Ref Environment
+        ECSCluster: !Ref ECSCluster
+        ECSService: !Ref ECSService
+        MinCapacity: '2'
+        MaxCapacity: '20'
+        TargetCPUUtilization: '60'
+        TargetMemoryUtilization: '70'
+        ScaleOutCooldown: '60'
+        ScaleInCooldown: '300'
+        EnablePredictiveScaling: 'true'
+        EnableScheduledScaling: 'true'
+        BusinessHoursStart: '09:00'
+        BusinessHoursEnd: '17:00'
+        TimeZone: 'America/Los_Angeles'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: AutoScaling
+
+  # CloudWatch Logs Stack
+  CloudWatchLogsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: './cloudwatch-logs.yaml'
+      Parameters:
+        ApplicationName: !Ref ApplicationName
+        Environment: !Ref Environment
+        LogRetentionDays: '30'
+        EnableContainerInsights: 'true'
+        EnableQueryLogging: 'true'
+        EnableFireLens: 'true'
+        EnableLogMetrics: 'true'
+        EnableLogAlarms: 'true'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: CloudWatch-Logs
+
+  # Cross-Stack References and Outputs
+  CertificateArnExport:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    DependsOn: SSLCertificateStack
+
+  DNSZoneExport:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    DependsOn: Route53DNSStack
+
+  TaskDefinitionExport:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    DependsOn: ECSTaskDefinitionsStack
+
+  AutoScalingExport:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    DependsOn: AutoScalingStack
+
+  CloudWatchLogsExport:
+    Type: AWS::CloudFormation::WaitConditionHandle
+    DependsOn: CloudWatchLogsStack
+
+Outputs:
+  # SSL Certificate Outputs
+  CertificateArn:
+    Description: 'ARN of the SSL certificate'
+    Value: !GetAtt SSLCertificateStack.Outputs.CertificateArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CertificateArn'
+  
+  CertificateDNSName:
+    Description: 'DNS name of the certificate'
+    Value: !GetAtt SSLCertificateStack.Outputs.CertificateDNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-CertificateDNSName'
+  
+  # DNS Outputs
+  PublicHostedZoneId:
+    Description: 'ID of the public hosted zone'
+    Value: !GetAtt Route53DNSStack.Outputs.PublicHostedZoneId
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicHostedZoneId'
+  
+  APIEndpoint:
+    Description: 'API endpoint URL'
+    Value: !GetAtt Route53DNSStack.Outputs.APIEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-APIEndpoint'
+  
+  NameServers:
+    Description: 'Name servers for the public hosted zone'
+    Value: !GetAtt Route53DNSStack.Outputs.NameServers
+    Export:
+      Name: !Sub '${AWS::StackName}-NameServers'
+  
+  # ECS Task Definition Outputs
+  TaskDefinitionArn:
+    Description: 'ARN of the main task definition'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.TaskDefinitionArn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinitionArn'
+  
+  MultiContainerTaskDefinitionArn:
+    Description: 'ARN of the multi-container task definition'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.MultiContainerTaskDefinitionArn
+    Export:
+      Name: !Sub '${AWS::StackName}-MultiContainerTaskDefinitionArn'
+  
+  TaskExecutionRoleArn:
+    Description: 'ARN of the task execution role'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.TaskExecutionRoleArn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskExecutionRoleArn'
+  
+  TaskRoleArn:
+    Description: 'ARN of the task role'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.TaskRoleArn
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskRoleArn'
+  
+  ApplicationLogGroupName:
+    Description: 'Name of the application log group'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.ApplicationLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationLogGroupName'
+  
+  DatabasePasswordSecretArn:
+    Description: 'ARN of the database password secret'
+    Value: !GetAtt ECSTaskDefinitionsStack.Outputs.DatabasePasswordSecretArn
+    Export:
+      Name: !Sub '${AWS::StackName}-DatabasePasswordSecretArn'
+  
+  # Auto Scaling Outputs
+  ScalableTargetId:
+    Description: 'ID of the scalable target'
+    Value: !GetAtt AutoScalingStack.Outputs.ScalableTargetId
+    Export:
+      Name: !Sub '${AWS::StackName}-ScalableTargetId'
+  
+  CPUTargetPolicyArn:
+    Description: 'ARN of the CPU target tracking policy'
+    Value: !GetAtt AutoScalingStack.Outputs.CPUTargetPolicyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CPUTargetPolicyArn'
+  
+  MemoryTargetPolicyArn:
+    Description: 'ARN of the memory target tracking policy'
+    Value: !GetAtt AutoScalingStack.Outputs.MemoryTargetPolicyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-MemoryTargetPolicyArn'
+  
+  StepScaleOutPolicyArn:
+    Description: 'ARN of the step scale-out policy'
+    Value: !GetAtt AutoScalingStack.Outputs.StepScaleOutPolicyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-StepScaleOutPolicyArn'
+  
+  StepScaleInPolicyArn:
+    Description: 'ARN of the step scale-in policy'
+    Value: !GetAtt AutoScalingStack.Outputs.StepScaleInPolicyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-StepScaleInPolicyArn'
+  
+  PredictivePolicyArn:
+    Description: 'ARN of the predictive scaling policy'
+    Value: !GetAtt AutoScalingStack.Outputs.PredictivePolicyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-PredictivePolicyArn'
+  
+  AlarmTopicArn:
+    Description: 'ARN of the SNS topic for scaling alarms'
+    Value: !GetAtt AutoScalingStack.Outputs.AlarmTopicArn
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmTopicArn'
+  
+  # CloudWatch Logs Outputs
+  CloudWatchApplicationLogGroupName:
+    Description: 'Name of the CloudWatch application log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.ApplicationLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchApplicationLogGroupName'
+  
+  CloudWatchApplicationLogGroupArn:
+    Description: 'ARN of the CloudWatch application log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.ApplicationLogGroupArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchApplicationLogGroupArn'
+  
+  CloudWatchFireLensLogGroupName:
+    Description: 'Name of the CloudWatch FireLens log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.FireLensLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchFireLensLogGroupName'
+  
+  CloudWatchAccessLogGroupName:
+    Description: 'Name of the CloudWatch access log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.AccessLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchAccessLogGroupName'
+  
+  CloudWatchErrorLogGroupName:
+    Description: 'Name of the CloudWatch error log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.ErrorLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchErrorLogGroupName'
+  
+  CloudWatchPerformanceLogGroupName:
+    Description: 'Name of the CloudWatch performance log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.PerformanceLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchPerformanceLogGroupName'
+  
+  CloudWatchEncryptedLogGroupName:
+    Description: 'Name of the CloudWatch encrypted log group'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.EncryptedLogGroupName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchEncryptedLogGroupName'
+  
+  CloudWatchLogKMSKeyArn:
+    Description: 'ARN of the KMS key for log encryption'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.LogKMSKeyArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchLogKMSKeyArn'
+  
+  CloudWatchLogBucketName:
+    Description: 'Name of the S3 bucket for log archival'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.LogBucketName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchLogBucketName'
+  
+  CloudWatchFireLensTaskRoleArn:
+    Description: 'ARN of the FireLens task role'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.FireLensTaskRoleArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchFireLensTaskRoleArn'
+  
+  CloudWatchAlarmTopicArn:
+    Description: 'ARN of the SNS topic for log alarms'
+    Value: !GetAtt CloudWatchLogsStack.Outputs.AlarmTopicArn
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchAlarmTopicArn'
+  
+  # Infrastructure Summary
+  InfrastructureSummary:
+    Description: 'Summary of deployed infrastructure'
+    Value: !Sub |
+      EconoVault API Infrastructure Deployed Successfully!
+      
+      SSL Certificate: ${CertificateArn}
+      API Endpoint: ${APIEndpoint}
+      Task Definition: ${TaskDefinitionArn}
+      Auto Scaling: ${ScalableTargetId}
+      CloudWatch Logs: ${CloudWatchApplicationLogGroupName}
+      
+      All components are configured and ready for production use.
