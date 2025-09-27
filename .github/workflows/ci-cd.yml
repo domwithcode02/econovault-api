@@ -11,6 +11,12 @@ on:
 env:
   PYTHON_VERSION: '3.11'
   UVICORN_WORKERS: 2
+  DEPLOYMENT_TIMEOUT: 5
+  HEALTH_CHECK_TIMEOUT_STAGING: 10
+  HEALTH_CHECK_TIMEOUT_PRODUCTION: 15
+  MAX_HEALTH_CHECK_ATTEMPTS_STAGING: 10
+  MAX_HEALTH_CHECK_ATTEMPTS_PRODUCTION: 15
+  HEALTH_CHECK_INTERVAL: 30
 
 jobs:
   # Security and Code Quality Checks
@@ -20,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -39,7 +45,7 @@ jobs:
         run: semgrep --config=auto --json --output=semgrep-report.json backend/ || true
         
       - name: Upload security reports
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: security-reports
@@ -55,7 +61,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -111,7 +117,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
@@ -138,7 +144,7 @@ jobs:
             -v
           
       - name: Upload coverage reports
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report-python-${{ matrix.python-version }}
           path: |
@@ -169,7 +175,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -191,7 +197,7 @@ jobs:
             -v
             
       - name: Upload integration test results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: integration-test-results
@@ -220,7 +226,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -249,7 +255,7 @@ jobs:
             -v
             
       - name: Upload API test results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: api-test-results
@@ -265,7 +271,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -293,7 +299,7 @@ jobs:
             --csv performance-results
             
       - name: Upload performance results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: performance-results
           path: |
@@ -329,42 +335,54 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-scan, code-quality, unit-tests, integration-tests, api-tests, docker-build]
     if: github.ref == 'refs/heads/develop'
-    environment: staging
+    environment:
+      name: staging
+    
+    env:
+      RENDER_STAGING_DEPLOY_HOOK: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
+      STAGING_HEALTH_URL: ${{ vars.STAGING_HEALTH_URL }}
     
     steps:
       - uses: actions/checkout@v4
       
       - name: Deploy to Staging
-        env:
-          deploy_url: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
-          staging_health_url: ${{ secrets.STAGING_HEALTH_URL }}
+        timeout-minutes: ${{ env.DEPLOYMENT_TIMEOUT }}
         run: |
-          curl "$deploy_url"
+          echo "Starting deployment to staging environment..."
+          if curl -s -f "$RENDER_STAGING_DEPLOY_HOOK"; then
+            echo "Deployment trigger sent successfully"
+          else
+            echo "Failed to trigger deployment"
+            exit 1
+          fi
           
       - name: Wait for deployment
-        run: sleep 60
+        run: |
+          echo "Waiting for deployment to complete..."
+          sleep 60
         
       - name: Health Check
-        env:
-          staging_health_url: ${{ secrets.STAGING_HEALTH_URL }}
+        timeout-minutes: ${{ env.HEALTH_CHECK_TIMEOUT_STAGING }}
         run: |
-          max_attempts=10
+          echo "Starting health check for staging environment..."
+          max_attempts=${{ env.MAX_HEALTH_CHECK_ATTEMPTS_STAGING }}
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            response=$(curl -s -o /dev/null -w "%{http_code}" "$staging_health_url")
+            echo "Health check attempt $attempt of $max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" "$STAGING_HEALTH_URL")
             
             if [ $response -eq 200 ]; then
-              echo "Health check passed"
+              echo "✅ Health check passed for staging environment"
               exit 0
             fi
             
-            echo "Attempt $attempt failed with status $response"
+            echo "❌ Attempt $attempt failed with status $response"
             attempt=$((attempt + 1))
-            sleep 30
+            sleep ${{ env.HEALTH_CHECK_INTERVAL }}
           done
           
-          echo "Health check failed after $max_attempts attempts"
+          echo "🚨 Health check failed after $max_attempts attempts"
           exit 1
 
   # Deploy to Production
@@ -372,53 +390,70 @@ jobs:
     runs-on: ubuntu-latest
     needs: [security-scan, code-quality, unit-tests, integration-tests, api-tests, docker-build]
     if: github.ref == 'refs/heads/main'
-    environment: production
+    environment:
+      name: production
+    
+    env:
+      RENDER_PRODUCTION_DEPLOY_HOOK: ${{ secrets.RENDER_PRODUCTION_DEPLOY_HOOK }}
+      PRODUCTION_HEALTH_URL: ${{ vars.PRODUCTION_HEALTH_URL }}
+      RENDER_ROLLBACK_HOOK: ${{ secrets.RENDER_ROLLBACK_HOOK }}
     
     steps:
       - uses: actions/checkout@v4
       
       - name: Deploy to Production
-        env:
-          deploy_url: ${{ secrets.RENDER_PRODUCTION_DEPLOY_HOOK }}
+        timeout-minutes: ${{ env.DEPLOYMENT_TIMEOUT }}
         run: |
-          curl "$deploy_url"
+          echo "🚀 Starting deployment to production environment..."
+          if curl -s -f "$RENDER_PRODUCTION_DEPLOY_HOOK"; then
+            echo "✅ Deployment trigger sent successfully"
+          else
+            echo "❌ Failed to trigger deployment"
+            exit 1
+          fi
           
       - name: Wait for deployment
-        run: sleep 90
+        run: |
+          echo "⏳ Waiting for production deployment to complete..."
+          sleep 90
         
       - name: Health Check
         id: health-check
-        env:
-          production_health_url: ${{ secrets.PRODUCTION_HEALTH_URL }}
+        timeout-minutes: ${{ env.HEALTH_CHECK_TIMEOUT_PRODUCTION }}
         run: |
-          max_attempts=15
+          echo "🔍 Starting health check for production environment..."
+          max_attempts=${{ env.MAX_HEALTH_CHECK_ATTEMPTS_PRODUCTION }}
           attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            response=$(curl -s -o /dev/null -w "%{http_code}" "$production_health_url")
+            echo "Health check attempt $attempt of $max_attempts"
+            response=$(curl -s -o /dev/null -w "%{http_code}" "$PRODUCTION_HEALTH_URL")
             
             if [ $response -eq 200 ]; then
-              echo "Health check passed"
+              echo "✅ Health check passed for production environment"
               echo "healthy=true" >> $GITHUB_OUTPUT
               exit 0
             fi
             
-            echo "Attempt $attempt failed with status $response"
+            echo "❌ Attempt $attempt failed with status $response"
             attempt=$((attempt + 1))
-            sleep 30
+            sleep ${{ env.HEALTH_CHECK_INTERVAL }}
           done
           
-          echo "Health check failed after $max_attempts attempts"
+          echo "🚨 Health check failed after $max_attempts attempts"
           echo "healthy=false" >> $GITHUB_OUTPUT
           exit 1
           
       - name: Rollback on failure
         if: steps.health-check.outputs.healthy == 'false'
-        env:
-          rollback_url: ${{ secrets.RENDER_ROLLBACK_HOOK }}
+        timeout-minutes: ${{ env.DEPLOYMENT_TIMEOUT }}
         run: |
-          echo "Deployment failed health check. Triggering rollback..."
-          curl -X POST "$rollback_url"
+          echo "🔄 Deployment failed health check. Triggering rollback..."
+          if curl -s -f -X POST "$RENDER_ROLLBACK_HOOK"; then
+            echo "✅ Rollback triggered successfully"
+          else
+            echo "❌ Failed to trigger rollback"
+          fi
           exit 1
 
   # Post-deployment verification
@@ -426,6 +461,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [deploy-production]
     if: github.ref == 'refs/heads/main'
+    
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     
     steps:
       - uses: actions/checkout@v4
@@ -441,8 +480,6 @@ jobs:
           pip install requests
           
       - name: Run post-deployment tests
-        env:
-          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
         run: |
           python scripts/post_deployment_tests.py
           
@@ -456,5 +493,3 @@ jobs:
             Branch: ${{ github.ref }}
             Commit: ${{ github.sha }}
             Author: ${{ github.actor }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

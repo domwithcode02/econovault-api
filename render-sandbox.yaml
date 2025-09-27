@@ -88,8 +88,8 @@ services:
 # Sandbox database (free tier)
 databases:
   - name: econovault-sandbox-db
-    databaseName: econovault_sandbox
-    user: econovault_sandbox_user
+    databaseName: econovault_db
+    user: econovault_db_user
     plan: free  # Free tier for sandbox
     postgresVersion: "15"
     highAvailability: false  # No HA needed for sandbox

@@ -8,7 +8,7 @@ from datetime import date
 import os
 
 # Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/econovault")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://econovault_db_user:ZAVQLwpbCEr9pEKnYMugHOvsQ1764yHe@dpg-d3bmeur7mgec739r7af0-a/econovault_db")
 
 # Create engine
 engine = create_engine(

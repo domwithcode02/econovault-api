@@ -79,8 +79,8 @@ services:
 # Database configuration with high availability
 databases:
   - name: econovault-db
-    databaseName: econovault
-    user: econovault_admin
+    databaseName: econovault_db
+    user: econovault_db_user
     plan: pro  # Professional plan for HA features
     postgresVersion: "15"
     highAvailability: true  # Enable automatic failover
