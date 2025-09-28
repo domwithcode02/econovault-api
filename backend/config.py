@@ -65,6 +65,21 @@ class BaseConfig(BaseSettings):
     secure_headers: bool = Field(default=True)
     cors_origins: List[str] = Field(default=["*"])
     
+    # Alerting Configuration
+    alerting_enabled: bool = Field(default=True)
+    slack_token: Optional[str] = Field(default=None)
+    slack_channel: str = Field(default="#alerts")
+    pagerduty_token: Optional[str] = Field(default=None)
+    pagerduty_routing_key: Optional[str] = Field(default=None)
+    alert_email_enabled: bool = Field(default=False)
+    alert_email_from: Optional[str] = Field(default=None)
+    alert_email_to: List[str] = Field(default_factory=list)
+    alert_smtp_host: str = Field(default="localhost")
+    alert_smtp_port: int = Field(default=587)
+    alert_smtp_username: Optional[str] = Field(default=None)
+    alert_smtp_password: Optional[str] = Field(default=None)
+    alert_smtp_use_tls: bool = Field(default=True)
+    
     # External API Settings
     bls_api_key: Optional[str] = Field(default=None)
     bea_api_key: Optional[str] = Field(default=None)

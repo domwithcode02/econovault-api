@@ -13,13 +13,31 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
-from fastapi import FastAPI, status, APIRouter, Security, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, status, APIRouter, Security, Depends, HTTPException, Request, Query
+from fastapi.responses import StreamingResponse, PlainTextResponse
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from typing import Literal
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 # Load environment variables
 load_dotenv()
+
+# Import configuration
+from config import get_config
+
+# Import pagination
+from fastapi_pagination import Page, add_pagination, paginate
+from fastapi_pagination.links import Page as LinkedPage
+from fastapi_pagination.default import Page as DefaultPage
+
+# Import alerting and monitoring
+from alerting import AlertingService, AlertConfig, initialize_alerting, get_alerting_service, CircuitBreakerAlertListener
+from monitoring import init_monitoring, get_monitoring, monitor_function
 
 # Import core components
 from bls_client import BLSClient, BLSAPIException
@@ -43,6 +61,37 @@ bls_api_key = os.getenv('BLS_API_KEY')
 if not bls_api_key:
     logger.warning("BLS_API_KEY not found in environment variables")
 bls_client = BLSClient(api_key=bls_api_key)
+
+# Get configuration
+config = get_config()
+
+# Initialize alerting service
+if config.alerting_enabled:
+    alert_config = AlertConfig(
+        slack_token=config.slack_token,
+        slack_channel=config.slack_channel,
+        pagerduty_token=config.pagerduty_token,
+        pagerduty_routing_key=config.pagerduty_routing_key,
+        email_enabled=config.alert_email_enabled,
+        email_from=config.alert_email_from,
+        email_to=config.alert_email_to,
+        smtp_host=config.alert_smtp_host,
+        smtp_port=config.alert_smtp_port,
+        smtp_username=config.alert_smtp_username,
+        smtp_password=config.alert_smtp_password,
+        smtp_use_tls=config.alert_smtp_use_tls
+    )
+    initialize_alerting(alert_config)
+    logger.info("Alerting system initialized")
+
+# Initialize monitoring system
+monitoring_config = {
+    "metrics_retention_hours": config.metrics_retention_days * 24,
+    "enable_system_monitoring": True
+}
+monitoring = init_monitoring(monitoring_config)
+monitoring.start_monitoring(interval_seconds=60)
+logger.info("Monitoring system initialized")
 
 # Initialize streaming
 streamer = RealTimeDataStreamer(bls_client)
@@ -95,6 +144,225 @@ class DataExportResponse(BaseModel):
     estimated_completion: datetime
     download_url: str
     expires_at: datetime
+
+
+class PaginationParams(BaseModel):
+    """Enhanced pagination parameters"""
+    limit: int = Field(default=100, ge=1, le=1000, description="Number of items per page")
+    offset: int = Field(default=0, ge=0, description="Number of items to skip")
+    sort_by: str = Field(default="title", description="Field to sort by")
+    sort_order: Literal["asc", "desc"] = Field(default="asc", description="Sort order")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "limit": 50,
+                "offset": 0,
+                "sort_by": "title",
+                "sort_order": "asc"
+            }
+        }
+
+
+class PaginatedResponse(BaseModel):
+    """Standard paginated response format"""
+    items: List[Dict[str, Any]]
+    total: int
+    limit: int
+    offset: int
+    has_next: bool
+    has_previous: bool
+    links: Dict[str, str] = Field(default_factory=dict, description="HATEOAS navigation links")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "items": [
+                    {"series_id": "CUUR0000SA0", "title": "Consumer Price Index"}
+                ],
+                "total": 150,
+                "limit": 50,
+                "offset": 0,
+                "has_next": True,
+                "has_previous": False,
+                "links": {
+                    "self": "/v1/indicators?limit=50&offset=0",
+                    "first": "/v1/indicators?limit=50&offset=0",
+                    "next": "/v1/indicators?limit=50&offset=50",
+                    "last": "/v1/indicators?limit=50&offset=100"
+                }
+            }
+        }
+
+
+class HATEOASLink(BaseModel):
+    """HATEOAS link model"""
+    href: str
+    title: Optional[str] = None
+    type: Optional[str] = "application/json"
+    method: Optional[str] = "GET"
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "href": "/v1/indicators/CUUR0000SA0",
+                "title": "Consumer Price Index",
+                "type": "application/json",
+                "method": "GET"
+            }
+        }
+
+
+class HATEOASResponse(BaseModel):
+    """HATEOAS response wrapper"""
+    data: Dict[str, Any]
+    links: Dict[str, HATEOASLink] = Field(default_factory=dict, description="HATEOAS links")
+    embedded: Optional[Dict[str, Any]] = Field(default=None, description="Embedded resources")
+    meta: Optional[Dict[str, Any]] = Field(default=None, description="Metadata")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "data": {
+                    "series_id": "CUUR0000SA0",
+                    "title": "Consumer Price Index for All Urban Consumers",
+                    "source": "BLS",
+                    "indicator_type": "CPI"
+                },
+                "links": {
+                    "self": {
+                        "href": "/v1/indicators/CUUR0000SA0",
+                        "title": "Self",
+                        "type": "application/json",
+                        "method": "GET"
+                    },
+                    "data": {
+                        "href": "/v1/indicators/CUUR0000SA0/data",
+                        "title": "Time Series Data",
+                        "type": "application/json",
+                        "method": "GET"
+                    },
+                    "stream": {
+                        "href": "/v1/indicators/CUUR0000SA0/stream",
+                        "title": "Real-time Stream",
+                        "type": "text/event-stream",
+                        "method": "GET"
+                    }
+                },
+                "meta": {
+                    "last_updated": "2024-01-15T10:30:00Z",
+                    "data_points_count": 1200,
+                    "freshest_data": "2024-01-14T00:00:00Z"
+                }
+            }
+        }
+
+
+class LinkGenerator:
+    """HATEOAS link generator utility"""
+    
+    def __init__(self, request: Request):
+        self.request = request
+        self.base_url = str(request.base_url).rstrip('/')
+    
+    def build_url(self, path: str, query_params: Optional[Dict[str, Any]] = None) -> str:
+        """Build URL with optional query parameters"""
+        url = f"{self.base_url}{path}"
+        if query_params:
+            query_string = "&".join([f"{k}={v}" for k, v in query_params.items() if v is not None])
+            if query_string:
+                url += f"?{query_string}"
+        return url
+    
+    def self_link(self, path: str, query_params: Optional[Dict[str, Any]] = None) -> HATEOASLink:
+        """Generate self link"""
+        return HATEOASLink(
+            href=self.build_url(path, query_params),
+            title="Self",
+            method="GET"
+        )
+    
+    def pagination_links(self, path: str, pagination: PaginationParams, total_items: int) -> Dict[str, HATEOASLink]:
+        """Generate pagination links"""
+        total_pages = (total_items + pagination.limit - 1) // pagination.limit
+        current_page = (pagination.offset // pagination.limit) + 1
+        
+        links = {
+            "self": self.self_link(path, {
+                "limit": pagination.limit,
+                "offset": pagination.offset,
+                "sort_by": pagination.sort_by,
+                "sort_order": pagination.sort_order
+            }),
+            "first": HATEOASLink(
+                href=self.build_url(path, {
+                    "limit": pagination.limit,
+                    "offset": 0,
+                    "sort_by": pagination.sort_by,
+                    "sort_order": pagination.sort_order
+                }),
+                title="First Page"
+            ),
+            "last": HATEOASLink(
+                href=self.build_url(path, {
+                    "limit": pagination.limit,
+                    "offset": max(0, (total_pages - 1) * pagination.limit),
+                    "sort_by": pagination.sort_by,
+                    "sort_order": pagination.sort_order
+                }),
+                title="Last Page"
+            )
+        }
+        
+        # Add previous link if not on first page
+        if pagination.offset > 0:
+            prev_offset = max(0, pagination.offset - pagination.limit)
+            links["prev"] = HATEOASLink(
+                href=self.build_url(path, {
+                    "limit": pagination.limit,
+                    "offset": prev_offset,
+                    "sort_by": pagination.sort_by,
+                    "sort_order": pagination.sort_order
+                }),
+                title="Previous Page"
+            )
+        
+        # Add next link if not on last page
+        if pagination.offset + pagination.limit < total_items:
+            next_offset = pagination.offset + pagination.limit
+            links["next"] = HATEOASLink(
+                href=self.build_url(path, {
+                    "limit": pagination.limit,
+                    "offset": next_offset,
+                    "sort_by": pagination.sort_by,
+                    "sort_order": pagination.sort_order
+                }),
+                title="Next Page"
+            )
+        
+        return links
+    
+    def indicator_links(self, series_id: str) -> Dict[str, HATEOASLink]:
+        """Generate links for a specific indicator"""
+        return {
+            "self": HATEOASLink(
+                href=self.build_url(f"/v1/indicators/{series_id}"),
+                title="Indicator Details"
+            ),
+            "data": HATEOASLink(
+                href=self.build_url(f"/v1/indicators/{series_id}/data"),
+                title="Time Series Data"
+            ),
+            "stream": HATEOASLink(
+                href=self.build_url(f"/v1/indicators/{series_id}/stream"),
+                title="Real-time Stream",
+                type="text/event-stream"
+            ),
+            "related": HATEOASLink(
+                href=self.build_url(f"/v1/indicators", {"indicator_type": "CPI"}),
+                title="Related Indicators"
+            )
+        }
 
 
 # Create main app
@@ -177,6 +445,117 @@ app = FastAPI(
     docs_url="/docs",
     openapi_url="/openapi.json"
 )
+
+# Add pagination support
+add_pagination(app)
+
+# Add security middleware
+# HTTPS enforcement (production only)
+if config.environment == "production":
+    app.add_middleware(HTTPSRedirectMiddleware)
+
+# Response compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+    expose_headers=["X-Rate-Limit-Remaining", "X-Rate-Limit-Reset", "X-Request-ID"],
+    max_age=3600,
+)
+
+# Trusted host middleware
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "econovault.com",
+        "*.econovault.com", 
+        "localhost",
+        "127.0.0.1"
+    ]
+)
+
+# Custom security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+    
+    # Add OWASP recommended security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Add HSTS header for HTTPS enforcement (production only)
+    if config.environment == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    
+    return response
+
+
+# API error monitoring middleware
+@app.middleware("http")
+async def api_error_monitoring(request: Request, call_next):
+    """Monitor API errors and send alerts for critical issues"""
+    start_time = time.time()
+    
+    try:
+        response = await call_next(request)
+        
+        # Track response time
+        duration = time.time() - start_time
+        
+        # Alert on slow responses (>5 seconds)
+        if duration > 5.0:
+            try:
+                alerting_service = get_alerting_service()
+                await alerting_service.send_api_error_alert(
+                    method=request.method,
+                    endpoint=str(request.url.path),
+                    status_code=response.status_code,
+                    error_message=f"Slow response: {duration:.2f}s",
+                    user_id="system"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send slow response alert: {e}")
+        
+        # Alert on high error rates (5xx errors)
+        if response.status_code >= 500:
+            try:
+                alerting_service = get_alerting_service()
+                await alerting_service.send_api_error_alert(
+                    method=request.method,
+                    endpoint=str(request.url.path),
+                    status_code=response.status_code,
+                    error_message=f"Server error: {response.status_code}",
+                    user_id="system"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send error alert: {e}")
+        
+        return response
+        
+    except Exception as e:
+        # Alert on unhandled exceptions
+        try:
+            alerting_service = get_alerting_service()
+            await alerting_service.send_api_error_alert(
+                method=request.method,
+                endpoint=str(request.url.path),
+                status_code=500,
+                error_message=f"Unhandled exception: {str(e)}",
+                user_id="system"
+            )
+        except Exception as alert_error:
+            logger.warning(f"Failed to send exception alert: {alert_error}")
+        
+        # Re-raise the exception
+        raise
 
 # Create main router
 router = APIRouter(prefix="/v1", tags=["api"])
@@ -398,14 +777,16 @@ indicators.forEach(indicator => {
         ]
     }
 )
+@monitor_function(metric_name="get_indicators", track_time=True, track_errors=True)
 async def get_indicators(
+    request: Request,
     source: Optional[str] = None,
     indicator_type: Optional[str] = None,
-    limit: int = 100,
+    pagination: PaginationParams = Depends(),
     current_user: Optional[Dict] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """Get list of economic indicators with comprehensive filtering options."""
+    """Get list of economic indicators with comprehensive filtering options and enhanced pagination."""
     
     # Log access if user is authenticated
     if current_user:
@@ -423,7 +804,15 @@ async def get_indicators(
         except Exception as e:
             logger.error(f"Failed to log audit event: {str(e)}")
     
-    result = []
+    # Track metrics
+    monitoring = get_monitoring()
+    monitoring.metrics.increment_counter(
+        "api_requests_total",
+        labels={"endpoint": "get_indicators", "method": "GET", "status": "200"}
+    )
+    
+    # Get all indicators that match filters
+    filtered_indicators = []
     
     for series_id, indicator in popular_series.items():
         # Apply filters
@@ -432,7 +821,7 @@ async def get_indicators(
         if indicator_type and indicator["indicator_type"] != indicator_type:
             continue
         
-        result.append({
+        filtered_indicators.append({
             "series_id": indicator["series_id"],
             "title": indicator["title"],
             "source": indicator["source"],
@@ -443,7 +832,38 @@ async def get_indicators(
             "units": indicator["units"]
         })
     
-    return result[:limit]
+    # Apply sorting
+    valid_sort_fields = ["title", "source", "indicator_type", "frequency", "series_id"]
+    if pagination.sort_by in valid_sort_fields:
+        reverse_order = pagination.sort_order == "desc"
+        filtered_indicators.sort(key=lambda x: x[pagination.sort_by], reverse=reverse_order)
+    
+    # Apply pagination
+    total_items = len(filtered_indicators)
+    start_index = pagination.offset
+    end_index = min(start_index + pagination.limit, total_items)
+    
+    paginated_items = filtered_indicators[start_index:end_index]
+    
+    # Generate HATEOAS links
+    link_generator = LinkGenerator(request)
+    pagination_links = link_generator.pagination_links("/v1/indicators", pagination, total_items)
+    
+    # Add individual indicator links to each item
+    for item in paginated_items:
+        item_links = link_generator.indicator_links(item["series_id"])
+        item["_links"] = {k: v.dict() for k, v in item_links.items()}
+    
+    # Build response
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total_items,
+        limit=pagination.limit,
+        offset=pagination.offset,
+        has_next=end_index < total_items,
+        has_previous=start_index > 0,
+        links={k: v.href for k, v in pagination_links.items()}
+    )
 
 
 @router.get(
@@ -543,12 +963,14 @@ if (indicator.latest_data) {
         ]
     }
 )
+@monitor_function(metric_name="get_indicator", track_time=True, track_errors=True)
 async def get_indicator(
+    request: Request,
     series_id: str,
     current_user: Optional[Dict] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """Get specific economic indicator by series ID with detailed metadata."""
+    """Get specific economic indicator by series ID with detailed metadata and HATEOAS links."""
     # Check if series is in our popular series list
     if series_id not in popular_series:
         raise HTTPException(status_code=404, detail=f"Indicator {series_id} not found")
@@ -571,6 +993,13 @@ async def get_indicator(
         except Exception as e:
             logger.error(f"Failed to log audit event: {str(e)}")
     
+    # Track metrics
+    monitoring = get_monitoring()
+    monitoring.metrics.increment_counter(
+        "api_requests_total",
+        labels={"endpoint": "get_indicator", "method": "GET", "status": "200", "indicator": series_id}
+    )
+    
     # Get latest data from BLS API with error handling
     try:
         latest_data = await error_handler.handle_bls_call(bls_client.get_latest_data, series_id)
@@ -592,7 +1021,12 @@ async def get_indicator(
         logger.error(f"Error fetching latest data for {series_id}: {str(e)}")
         latest_point = None
     
-    return {
+    # Generate HATEOAS links
+    link_generator = LinkGenerator(request)
+    indicator_links = link_generator.indicator_links(series_id)
+    
+    # Build response data
+    response_data = {
         "series_id": indicator["series_id"],
         "title": indicator["title"],
         "source": indicator["source"],
@@ -603,6 +1037,17 @@ async def get_indicator(
         "units": indicator["units"],
         "latest_data_point": latest_point
     }
+    
+    # Return HATEOAS response
+    return HATEOASResponse(
+        data=response_data,
+        links={k: v for k, v in indicator_links.items()},
+        meta={
+            "last_updated": datetime.utcnow().isoformat(),
+            "data_source": "Bureau of Labor Statistics",
+            "api_version": "1.0.0"
+        }
+    )
 
 
 @router.get(
@@ -745,6 +1190,9 @@ async def get_indicator_data(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 1000,
+    offset: int = 0,
+    sort_by: str = Query("date", description="Field to sort by (date, value)"),
+    sort_order: Literal["asc", "desc"] = Query("desc", description="Sort order"),
     current_user: Optional[Dict] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
@@ -826,15 +1274,30 @@ async def get_indicator_data(
                 filtered_points.append(point)
             data_points = filtered_points
         
-        # Apply limit
-        data_points = data_points[:limit]
+        # Apply sorting
+        valid_sort_fields = ["date", "value"]
+        if sort_by in valid_sort_fields:
+            reverse_order = sort_order == "desc"
+            data_points.sort(key=lambda x: x[sort_by], reverse=reverse_order)
+        
+        # Apply pagination
+        total_items = len(data_points)
+        start_index = offset
+        end_index = min(start_index + limit, total_items)
+        
+        paginated_data = data_points[start_index:end_index]
         
         return {
             "series_id": series_id,
-            "data_points": data_points,
-            "count": len(data_points),
-            "start_date": data_points[0]["date"] if data_points else None,
-            "end_date": data_points[-1]["date"] if data_points else None
+            "data_points": paginated_data,
+            "count": len(paginated_data),
+            "total": total_items,
+            "limit": limit,
+            "offset": offset,
+            "has_next": end_index < total_items,
+            "has_previous": start_index > 0,
+            "start_date": paginated_data[0]["date"] if paginated_data else None,
+            "end_date": paginated_data[-1]["date"] if paginated_data else None
         }
         
     except HTTPException:
@@ -1415,8 +1878,24 @@ async def root() -> Dict[str, str]:
     return {
         "message": "EconoVault API service running",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "metrics": "/metrics"
     }
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    """Prometheus metrics endpoint"""
+    from monitoring import get_monitoring
+    monitoring_system = get_monitoring()
+    
+    # Generate Prometheus metrics
+    metrics_data = generate_latest()
+    
+    return PlainTextResponse(
+        content=metrics_data.decode('utf-8'),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 
 if __name__ == "__main__":

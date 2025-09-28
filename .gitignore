@@ -126,3 +126,7 @@ WORKSTREAM_3_SUMMARY.md
 DEPLOYMENT_GUIDE.md
 IMPLEMENTATION_SUMMARY.md
 infrastructure_info.md
+.opencode/agent/ResilienceArchitect.md
+.opencode/agent/DataOperationsSpecialist.md
+.opencode/agent/APISecurityEnhancer.md
+implementation_progress.md

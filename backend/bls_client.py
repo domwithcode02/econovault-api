@@ -6,6 +6,7 @@ import logging
 from typing import List, Dict, Optional, Union, Any, TypedDict
 from datetime import datetime
 import urllib3
+import pybreaker
 
 # Disable SSL warnings for cleaner output
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -14,6 +15,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class BLSAPIException(Exception):
     """Custom exception for BLS API errors"""
     pass
+
+
+class BLSAPIMonitor(pybreaker.CircuitBreakerListener):
+    """Circuit breaker listener for BLS API monitoring"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+    
+    def state_change(self, cb, old_state, new_state):
+        """Log circuit breaker state changes"""
+        self.logger.warning(f"BLS API Circuit Breaker: {old_state} -> {new_state}")
+        
+    def failure(self, cb, exc):
+        """Log circuit breaker failures"""
+        self.logger.error(f"BLS API Circuit Breaker failure: {exc}")
+        
+    def success(self, cb):
+        """Log circuit breaker successes"""
+        self.logger.info("BLS API Circuit Breaker success")
 
 
 class APIPayload(TypedDict, total=False):
@@ -48,6 +68,28 @@ class BLSClient:
         # Configure logging
         logging.basicConfig(level=logging.INFO)
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize circuit breaker
+        self.circuit_breaker = pybreaker.CircuitBreaker(
+            fail_max=5,                    # 5 consecutive failures before opening
+            reset_timeout=60,              # 60 seconds before attempting reset
+            success_threshold=3,           # 3 successful calls before closing
+            name="BLS_API_BREAKER",
+            listeners=[BLSAPIMonitor()]
+        )
+        
+        # Exclude 4xx errors from circuit breaker failures
+        self.circuit_breaker.add_excluded_exception(requests.HTTPError)
+        
+        # Add alerting listener if alerting is available
+        try:
+            from alerting import get_alerting_service, CircuitBreakerAlertListener
+            alerting_service = get_alerting_service()
+            listener = CircuitBreakerAlertListener(alerting_service, "BLS_API")
+            self.circuit_breaker.add_listeners(listener)
+            self.logger.info("Circuit breaker alerting listener added")
+        except Exception as e:
+            self.logger.warning(f"Could not add circuit breaker alerting listener: {e}")
     
     def get_series_data(self, series_ids: Union[str, List[str]], 
                        start_year: Optional[int] = None, 
@@ -107,7 +149,7 @@ class BLSClient:
     def _make_request(self, series_ids: List[str], start_year: Optional[int], 
                      end_year: Optional[int], catalog: bool, calculations: bool, 
                      annual_average: bool, aspects: bool) -> Dict[str, Any]:
-        """Make API request with retry logic"""
+        """Make API request with retry logic and circuit breaker protection"""
         
         payload: APIPayload = {
             "seriesid": series_ids
@@ -128,6 +170,16 @@ class BLSClient:
             payload["aspects"] = aspects
         if self.api_key:
             payload["registrationkey"] = self.api_key
+        
+        # Use circuit breaker to protect the API call
+        return self.circuit_breaker.call(
+            self._make_request_with_retry, 
+            payload, 
+            series_ids
+        )
+    
+    def _make_request_with_retry(self, payload: APIPayload, series_ids: List[str]) -> Dict[str, Any]:
+        """Make API request with retry logic (protected by circuit breaker)"""
         
         for attempt in range(self.MAX_RETRIES):
             try:
