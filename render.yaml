@@ -58,16 +58,19 @@ services:
         value: "true"
       - key: RUN_MIGRATIONS
         value: "true"
-      # Production monitoring
-      - key: ENABLE_METRICS
-        value: "true"
-      - key: METRICS_RETENTION_DAYS
-        value: "30"
-      # Security headers
-      - key: SECURE_HEADERS
-        value: "true"
-      - key: CORS_ORIGINS
-        value: "https://econovault.com,https://api.econovault.com"
+       # Production monitoring
+       - key: ENABLE_METRICS
+         value: "true"
+       - key: METRICS_RETENTION_DAYS
+         value: "30"
+       # Security headers
+       - key: SECURE_HEADERS
+         value: "true"
+       - key: CORS_ORIGINS
+         value: "https://econovault.com,https://api.econovault.com"
+       # Redis configuration (disabled for now)
+       - key: REDIS_ENABLED
+         value: "false"
     # Disk configuration for data persistence
     disk:
       name: econovault-data

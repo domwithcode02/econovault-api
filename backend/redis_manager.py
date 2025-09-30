@@ -84,8 +84,13 @@ class RedisConfig:
         # Feature flags - disable Redis for development if not available
         redis_enabled_env = os.getenv("REDIS_ENABLED", "auto").lower()
         if redis_enabled_env == "auto":
-            # Auto-detect based on Redis availability
-            self.enabled = REDIS_AVAILABLE
+            # Auto-detect based on Redis availability and environment
+            if os.getenv('ENVIRONMENT') == 'production':
+                # In production, only enable if REDIS_URL is set
+                self.enabled = bool(os.getenv('REDIS_URL')) and REDIS_AVAILABLE
+            else:
+                # In development, enable if available
+                self.enabled = REDIS_AVAILABLE
         else:
             self.enabled = redis_enabled_env == "true"
         

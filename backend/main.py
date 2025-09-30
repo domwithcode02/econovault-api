@@ -461,7 +461,7 @@ class HATEOASResponse(BaseModel):
     meta: Optional[Dict[str, Any]] = Field(default=None, description="Metadata")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "data": {
                     "series_id": "CUUR0000SA0",

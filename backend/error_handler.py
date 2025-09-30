@@ -56,7 +56,7 @@ class FieldError(BaseModel):
     suggestions: Optional[List[str]] = Field(None, description="Suggested corrections")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "field": "series_id",
                 "message": "Series ID must be 8-20 uppercase alphanumeric characters",
@@ -81,7 +81,7 @@ class ErrorContext(BaseModel):
     user_id: Optional[str] = Field(None, description="User identifier if authenticated")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "timestamp": "2024-01-15T10:30:00.123Z",
                 "path": "/v1/indicators/INVALID123/data",
@@ -112,7 +112,7 @@ class StandardErrorResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "error": "validation_error",
                 "message": "Request validation failed",

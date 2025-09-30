@@ -77,6 +77,8 @@ fi
 # Run database migrations if enabled
 if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
     echo "Running database migrations..."
+    
+    # First, create tables using SQLAlchemy
     python -c "
 import sys
 import os
@@ -92,6 +94,53 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 "
+    
+    # Then run PostgreSQL-specific migration script
+    echo "Running PostgreSQL-specific migrations..."
+    if [ -f "/app/migrate_rotation_policy_postgres.sql" ]; then
+        python -c "
+import sys
+import os
+import psycopg2
+from urllib.parse import urlparse
+
+try:
+    # Parse DATABASE_URL
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url:
+        print('ERROR: DATABASE_URL not set')
+        sys.exit(1)
+    
+    # Parse URL and connect
+    result = urlparse(db_url)
+    conn = psycopg2.connect(
+        host=result.hostname,
+        port=result.port or 5432,
+        database=result.path[1:],  # Remove leading /
+        user=result.username,
+        password=result.password
+    )
+    
+    # Read and execute migration script
+    with open('/app/migrate_rotation_policy_postgres.sql', 'r') as f:
+        migration_sql = f.read()
+    
+    with conn.cursor() as cur:
+        cur.execute(migration_sql)
+    
+    conn.commit()
+    conn.close()
+    print('PostgreSQL migration completed successfully')
+    
+except Exception as e:
+    print(f'PostgreSQL migration failed: {e}')
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+"
+    else
+        echo "WARNING: PostgreSQL migration script not found, skipping"
+    fi
 fi
 
 echo "Security checks completed successfully"
