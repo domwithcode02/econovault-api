@@ -32,9 +32,9 @@ class BaseConfig(BaseSettings):
     environment: str = Field(default="development")
     debug: bool = Field(default=False)
     
-    # Security Settings - No defaults for production security
-    secret_key: str = Field(..., description="Secret key for JWT signing - must be provided")
-    master_encryption_key: str = Field(..., description="Master encryption key - must be provided")
+    # Security Settings - Loaded from environment variables
+    secret_key: str = Field(default="", description="Secret key for JWT signing - loaded from environment")
+    master_encryption_key: str = Field(default="", description="Master encryption key - loaded from environment")
     
     # Database Settings
     database_url: str = Field(default="sqlite:///./default.db")
@@ -70,8 +70,8 @@ class BaseConfig(BaseSettings):
     
     # Security Headers
     secure_headers: bool = Field(default=True)
-    cors_origins: List[str] = Field(
-        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com"]
+    cors_origins: str = Field(
+        default="https://econovault.com,https://api.econovault.com,https://econovault-api-2.onrender.com"
     )
     
     # External API Keys (Optional - can be None for development)
@@ -118,8 +118,6 @@ class BaseConfig(BaseSettings):
     @field_validator("secret_key", "master_encryption_key")
     def validate_security_keys(cls, v, info):
         """Validate that security keys are not using default/insecure values"""
-        if v is None:
-            return v  # Allow None for development/testing
         if not v or len(v) < 32:
             raise ValueError(f"{info.field_name} must be at least 32 characters long")
         if "default" in v.lower() or "change-in-production" in v.lower():
@@ -128,12 +126,38 @@ class BaseConfig(BaseSettings):
     
     @validator("cors_origins", pre=True)
     def parse_cors_origins(cls, v):
-        """Parse CORS origins from comma-separated string"""
+        """Parse CORS origins from comma-separated string or JSON array"""
         if isinstance(v, str):
-            if not v.strip():  # Handle empty string
-                return ["*"]
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+            stripped = v.strip()
+            if not stripped:  # Handle empty or whitespace-only string
+                logger.warning(f"CORS_ORIGINS environment variable is empty, using default '*'")
+                return "*"
+            
+            # Try to parse as JSON first (for JSON array format)
+            try:
+                # Only try JSON parsing if it looks like JSON (starts with [ or {)
+                if stripped.startswith('[') or stripped.startswith('{'):
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        # Convert JSON array back to comma-separated string
+                        result = ",".join(parsed)
+                        logger.info(f"Parsed CORS_ORIGINS JSON array: {stripped} -> {result}")
+                        return result
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Failed to parse CORS_ORIGINS as JSON: {stripped}, error: {e}")
+                pass  # Not valid JSON, continue with comma parsing
+            
+            # Return as-is (comma-separated string)
+            logger.info(f"Using CORS_ORIGINS as comma-separated string: {stripped}")
+            return stripped
         return v
+    
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Get CORS origins as a list"""
+        if not self.cors_origins or not self.cors_origins.strip():
+            return ["*"]
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 class DevelopmentConfig(BaseConfig):
@@ -153,7 +177,7 @@ class DevelopmentConfig(BaseConfig):
     
     # Relaxed security for development
     secure_headers: bool = Field(default=False)
-    cors_origins: List[str] = Field(default=["*"])
+    cors_origins: str = Field(default="*")
     
     # Enable detailed error messages
     show_error_details: bool = Field(default=True)
@@ -181,8 +205,8 @@ class StagingConfig(BaseConfig):
     
     # Enable security headers
     secure_headers: bool = Field(default=True)
-    cors_origins: List[str] = Field(
-        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com", "*"]
+    cors_origins: str = Field(
+        default="https://econovault.com,https://api.econovault.com,https://econovault-api-2.onrender.com,*"
     )
     
     # Hide error details in staging
@@ -210,8 +234,8 @@ class ProductionConfig(BaseConfig):
     
     # Strict security settings
     secure_headers: bool = Field(default=True)
-    cors_origins: List[str] = Field(
-        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com"]
+    cors_origins: str = Field(
+        default="https://econovault.com,https://api.econovault.com,https://econovault-api-2.onrender.com"
     )
     
     # Production logging
@@ -265,7 +289,7 @@ class RenderConfig(BaseConfig):
     
     # Security settings for Render
     secure_headers: bool = Field(default=True)
-    cors_origins: List[str] = Field(default_factory=lambda: ["*"])
+    cors_origins: str = Field(default="*")
     
     # Override database URL from Render environment if available
     @validator("database_url", pre=True)
@@ -444,7 +468,7 @@ class ConfigManager:
         
         return {
             "secure_headers": config.secure_headers,
-            "cors_origins": config.cors_origins,
+            "cors_origins": config.cors_origins_list,
             "gdpr_enabled": config.gdpr_enabled,
             "data_retention_days": config.data_retention_days,
             "consent_expiry_days": config.consent_expiry_days,

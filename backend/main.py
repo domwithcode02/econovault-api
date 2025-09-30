@@ -103,7 +103,7 @@ if config.alerting_enabled:
         pagerduty_routing_key=config.pagerduty_routing_key,
         email_enabled=config.alert_email_enabled,
         email_from=config.alert_email_from,
-        email_to=config.alert_email_to,
+        email_to=[config.alert_email_to] if isinstance(config.alert_email_to, str) else config.alert_email_to,
         smtp_host=config.alert_smtp_host,
         smtp_port=config.alert_smtp_port,
         smtp_username=config.alert_smtp_username,
