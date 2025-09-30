@@ -351,7 +351,22 @@ class ETagResponseWrapper:
         """Capture response messages"""
         if message["type"] == "http.response.start":
             self.status_code = message.get("status", 200)
-            self.headers = dict(message.get("headers", []))
+            # Convert headers from bytes to strings for easier manipulation
+            headers_dict = {}
+            for name, value in message.get("headers", []):
+                if isinstance(name, bytes):
+                    name_str = name.decode()
+                else:
+                    name_str = name
+                
+                if isinstance(value, bytes):
+                    value_str = value.decode()
+                else:
+                    value_str = value
+                
+                headers_dict[name_str] = value_str
+            
+            self.headers = headers_dict
             self._response_started = True
         elif message["type"] == "http.response.body":
             body_chunk = message.get("body", b"")
@@ -368,10 +383,17 @@ class ETagResponseWrapper:
         # Convert headers to list format
         header_list = []
         for name, value in self.headers.items():
+            if isinstance(name, str):
+                name_bytes = name.encode()
+            else:
+                name_bytes = name
+            
             if isinstance(value, str):
-                header_list.append((name.encode(), value.encode()))
-            elif isinstance(value, bytes):
-                header_list.append((name.encode(), value))
+                value_bytes = value.encode()
+            else:
+                value_bytes = value
+            
+            header_list.append((name_bytes, value_bytes))
         
         # Send start message
         await self.original_send({
@@ -392,10 +414,17 @@ class ETagResponseWrapper:
         # Convert headers back to list format
         header_list = []
         for name, value in self.headers.items():
+            if isinstance(name, str):
+                name_bytes = name.encode()
+            else:
+                name_bytes = name
+            
             if isinstance(value, str):
-                header_list.append((name.encode(), value.encode()))
-            elif isinstance(value, bytes):
-                header_list.append((name.encode(), value))
+                value_bytes = value.encode()
+            else:
+                value_bytes = value
+            
+            header_list.append((name_bytes, value_bytes))
         
         # Send start message
         await self.original_send({
