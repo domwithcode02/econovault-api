@@ -413,15 +413,20 @@ class HealthMonitor:
             
             total_services = len(self.service_health)
             healthy_services = sum(1 for h in self.service_health.values() if h.status == "healthy")
-            unhealthy_services = total_services - healthy_services
+            degraded_services = sum(1 for h in self.service_health.values() if h.status == "degraded")
+            unhealthy_services = sum(1 for h in self.service_health.values() if h.status == "unhealthy")
             
             # Calculate overall availability
             availabilities = [h.availability for h in self.service_health.values()]
             overall_availability = sum(availabilities) / len(availabilities) if availabilities else 0.0
             
             # Determine overall status
+            # Degraded services (like Redis fallback mode) should not make system unhealthy
             if unhealthy_services == 0:
-                status = "healthy"
+                if degraded_services == 0:
+                    status = "healthy"
+                else:
+                    status = "degraded"
             elif unhealthy_services < total_services / 2:
                 status = "degraded"
             else:
@@ -431,6 +436,7 @@ class HealthMonitor:
                 "status": status,
                 "services_count": total_services,
                 "healthy_services": healthy_services,
+                "degraded_services": degraded_services,
                 "unhealthy_services": unhealthy_services,
                 "overall_availability": overall_availability
             }
@@ -569,7 +575,9 @@ class MonitoringSystem:
                 source="monitoring_system",
                 tags={"type": "system_health", "status": "unhealthy"}
             )
-        elif overall_health["status"] == "degraded":
+        elif overall_health["status"] == "degraded" and overall_health["unhealthy_services"] > 0:
+            # Only alert for degraded status if there are actual unhealthy services
+            # (not just degraded services like Redis fallback mode)
             self.alerts.create_alert(
                 level=AlertLevel.WARNING,
                 title="System Health Degraded",

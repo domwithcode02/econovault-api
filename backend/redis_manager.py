@@ -45,11 +45,25 @@ class RedisConfig:
     """Redis configuration settings"""
     
     def __init__(self):
-        self.host = os.getenv("REDIS_HOST", "localhost")
-        self.port = int(os.getenv("REDIS_PORT", "6379"))
-        self.db = int(os.getenv("REDIS_DB", "0"))
-        self.password = os.getenv("REDIS_PASSWORD", None)
-        self.username = os.getenv("REDIS_USERNAME", None)
+        # Check for REDIS_URL first (Render and other platforms use this)
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            # Parse REDIS_URL format: redis://username:password@host:port/db
+            import urllib.parse
+            parsed = urllib.parse.urlparse(redis_url)
+            self.host = parsed.hostname or "localhost"
+            self.port = parsed.port or 6379
+            self.db = int(parsed.path.lstrip('/') or "0")
+            self.password = parsed.password
+            self.username = parsed.username
+        else:
+            # Fall back to individual environment variables
+            self.host = os.getenv("REDIS_HOST", "localhost")
+            self.port = int(os.getenv("REDIS_PORT", "6379"))
+            self.db = int(os.getenv("REDIS_DB", "0"))
+            self.password = os.getenv("REDIS_PASSWORD", None)
+            self.username = os.getenv("REDIS_USERNAME", None)
+        
         self.max_connections = int(os.getenv("REDIS_MAX_CONNECTIONS", "50"))
         self.socket_timeout = float(os.getenv("REDIS_SOCKET_TIMEOUT", "5.0"))
         self.socket_connect_timeout = float(os.getenv("REDIS_CONNECT_TIMEOUT", "5.0"))

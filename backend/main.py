@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from typing import Literal
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from sqlalchemy import text
 
 # Load environment variables
 load_dotenv()
@@ -115,13 +116,69 @@ if config.alerting_enabled:
 else:
     logger.info("Alerting system disabled")
 
-# Initialize monitoring system
-monitoring_config = {
-    "metrics_retention_hours": config.metrics_retention_days * 24,
-    "enable_system_monitoring": True
-}
-monitoring = init_monitoring(monitoring_config)
-logger.info("Monitoring system initialized")
+    # Initialize monitoring system
+    monitoring_config = {
+        "metrics_retention_hours": config.metrics_retention_days * 24,
+        "enable_system_monitoring": True
+    }
+    monitoring = init_monitoring(monitoring_config)
+    
+    # Register Redis health check
+    def redis_internal_health_check():
+        """Check Redis health - handle fallback mode gracefully"""
+        try:
+            # Check if Redis is available and initialized
+            if redis_manager._initialized:
+                return {
+                    "status": "healthy",
+                    "error_rate": 0.0,
+                    "availability": 100.0,
+                    "details": {"mode": "redis", "initialized": True}
+                }
+            else:
+                # Redis is in fallback mode, which is acceptable
+                return {
+                    "status": "degraded",
+                    "error_rate": 0.0,
+                    "availability": 100.0,
+                    "details": {"mode": "fallback", "message": "Redis unavailable, using fallback mode"}
+                }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error_rate": 100.0,
+                "availability": 0.0,
+                "details": {"error": str(e)}
+            }
+    
+    monitoring.health.register_health_check("redis", redis_internal_health_check)
+    
+    # Register database health check
+    def database_health_check():
+        """Check database health"""
+        try:
+            from database import get_db
+            db = next(get_db())
+            # Simple test query
+            db.execute(text("SELECT 1"))
+            db.close()
+            return {
+                "status": "healthy",
+                "error_rate": 0.0,
+                "availability": 100.0,
+                "details": {"connection": "ok"}
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error_rate": 100.0,
+                "availability": 0.0,
+                "details": {"error": str(e)}
+            }
+    
+    monitoring.health.register_health_check("database", database_health_check)
+    
+    logger.info("Monitoring system initialized")
 
 # Initialize streaming
 streamer = RealTimeDataStreamer(bls_client)
