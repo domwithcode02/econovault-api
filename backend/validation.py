@@ -580,6 +580,12 @@ class InputValidationMiddleware:
             await self.app(scope, receive, send)
             return
         
+        # Skip validation for OpenAPI endpoints
+        path = scope.get("path", "")
+        if path in ["/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"]:
+            await self.app(scope, receive, send)
+            return
+        
         # Create request object
         request = Request(scope, receive)
         
