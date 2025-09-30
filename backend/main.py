@@ -643,7 +643,9 @@ app.add_middleware(
         "econovault.com",
         "*.econovault.com", 
         "localhost",
-        "127.0.0.1"
+        "127.0.0.1",
+        "econovault-api-2.onrender.com",
+        "*.onrender.com"
     ]
 )
 
