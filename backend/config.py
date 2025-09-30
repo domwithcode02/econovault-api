@@ -215,7 +215,7 @@ class ProductionConfig(BaseConfig):
     # Strict security settings
     secure_headers: bool = Field(default=True)
     cors_origins: List[str] = Field(
-        default=["https://econovault.com", "https://api.econovault.com"]
+        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com"]
     )
     
     # Production logging
