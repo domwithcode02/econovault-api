@@ -146,6 +146,7 @@ class APIKey(Base):
     expires_at = Column(DateTime)
     next_rotation_date = Column(DateTime)
     usage_count = Column(Integer, default=0)
+    rotation_policy = Column(String(50), default="manual")
 
 
 class DeletionRequest(Base):
