@@ -8,7 +8,7 @@ This module provides centralized configuration management for different environm
 import os
 import json
 from typing import Dict, Any, Optional, List
-from pydantic import Field, validator
+from pydantic import Field, validator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 import logging
@@ -25,9 +25,9 @@ class BaseConfig(BaseSettings):
     environment: str = Field(default="development")
     debug: bool = Field(default=False)
     
-    # Security Settings
-    secret_key: str = Field(default="default-secret-key-change-in-production")
-    master_encryption_key: str = Field(default="default-encryption-key-change-in-production")
+    # Security Settings - No defaults for production security
+    secret_key: str = Field(..., description="Secret key for JWT signing - must be provided")
+    master_encryption_key: str = Field(..., description="Master encryption key - must be provided")
     
     # Database Settings
     database_url: str = Field(default="sqlite:///./default.db")
@@ -123,6 +123,15 @@ class BaseConfig(BaseSettings):
             raise ValueError(f"Log level must be one of: {valid_levels}")
         return v.upper()
     
+    @field_validator("secret_key", "master_encryption_key")
+    def validate_security_keys(cls, v, info):
+        """Validate that security keys are not using default/insecure values"""
+        if not v or len(v) < 32:
+            raise ValueError(f"{info.field_name} must be at least 32 characters long")
+        if "default" in v.lower() or "change-in-production" in v.lower():
+            raise ValueError(f"{info.field_name} cannot use default or placeholder values")
+        return v
+    
     @validator("cors_origins", pre=True)
     def parse_cors_origins(cls, v):
         """Parse CORS origins from comma-separated string"""
@@ -140,10 +149,10 @@ class DevelopmentConfig(BaseConfig):
     rate_limit_per_hour: int = 10000
     rate_limit_per_day: int = 100000
     
-    # Development database (SQLite)
+    # Development database (SQLite for local dev)
     database_url: str = Field(default="sqlite:///./dev.db")
     
-    # Development Redis (optional)
+    # Development Redis (disabled by default for local dev)
     redis_url: str = Field(default="redis://localhost:6379/0")
     
     # Relaxed security for development
@@ -152,6 +161,12 @@ class DevelopmentConfig(BaseConfig):
     
     # Enable detailed error messages
     show_error_details: bool = Field(default=True)
+    
+    # Override Redis settings for development
+    @validator("redis_url", pre=True)
+    def set_redis_url(cls, v):
+        """Set Redis URL for development"""
+        return v or "redis://localhost:6379/0"
 
 
 class StagingConfig(BaseConfig):
@@ -241,6 +256,51 @@ class TestingConfig(BaseConfig):
     show_error_details: bool = True
 
 
+class RenderConfig(BaseConfig):
+    """Render-specific configuration that detects Render environment variables"""
+    
+    debug: bool = Field(default=False)
+    
+    # Database will be configured via Render's environment variables
+    database_url: str = Field(default="")
+    
+    # Redis will be configured via Render's environment variables or disabled
+    redis_url: str = Field(default="redis://localhost:6379/0")
+    
+    # Security settings for Render
+    secure_headers: bool = Field(default=True)
+    cors_origins: List[str] = Field(default_factory=lambda: ["*"])
+    
+    # Override database URL from Render environment if available
+    @validator("database_url", pre=True)
+    def set_database_url(cls, v):
+        """Use Render's DATABASE_URL if available, otherwise use provided value"""
+        render_db_url = os.getenv("DATABASE_URL")
+        if render_db_url:
+            return render_db_url
+        return v or "sqlite:///./dev.db"
+    
+    # Override Redis URL from Render environment if available
+    @validator("redis_url", pre=True)
+    def set_redis_url(cls, v):
+        """Use Render's REDIS_URL if available, otherwise use provided value"""
+        render_redis_url = os.getenv("REDIS_URL")
+        if render_redis_url:
+            return render_redis_url
+        return v or "redis://localhost:6379/0"
+    
+    # Auto-detect environment based on Render variables
+    @validator("environment", pre=True)
+    def detect_environment(cls, v):
+        """Detect if we're running on Render and set appropriate environment"""
+        if is_render_environment():
+            # Check if it's explicitly set to staging
+            if os.getenv("RENDER_SERVICE_NAME", "").lower().find("staging") != -1:
+                return "staging"
+            return "production"
+        return v or "development"
+
+
 class ConfigManager:
     """Configuration manager with environment-specific settings"""
     
@@ -251,7 +311,7 @@ class ConfigManager:
     def get_config(self, environment: Optional[str] = None) -> BaseConfig:
         """Get configuration for specified environment"""
         if environment is None:
-            environment = os.getenv("ENVIRONMENT", "development")
+            environment = get_environment_for_render()
         
         # Return cached config if available
         if environment in self._config_cache:
@@ -274,8 +334,15 @@ class ConfigManager:
             "development": DevelopmentConfig,
             "staging": StagingConfig,
             "production": ProductionConfig,
-            "testing": TestingConfig
+            "testing": TestingConfig,
+            "render": RenderConfig
         }
+        
+        # If we're on Render but not explicitly set to production/staging, use RenderConfig
+        if environment == "production" and is_render_environment():
+            # Check if this is actually a Render deployment that needs specific handling
+            if not os.getenv("DATABASE_URL"):  # If no DATABASE_URL is explicitly set
+                return RenderConfig
         
         if environment not in config_classes:
             logger.warning(f"Unknown environment '{environment}', using development config")
@@ -402,6 +469,42 @@ def get_settings() -> BaseConfig:
 def get_config() -> BaseConfig:
     """Get current configuration"""
     return config_manager.get_current_config()
+
+
+def is_render_environment() -> bool:
+    """Check if we're running on Render platform"""
+    return (
+        os.getenv("RENDER") == "true" or 
+        os.getenv("RENDER_SERVICE_URL") is not None or
+        os.getenv("RENDER_EXTERNAL_URL") is not None
+    )
+
+
+def get_environment_for_render() -> str:
+    """Get appropriate environment for Render deployment"""
+    # Check if specific environment is set
+    env = os.getenv("ENVIRONMENT", "").lower()
+    
+    # Map short environment names to full names
+    env_mapping = {
+        "prod": "production",
+        "dev": "development",
+        "test": "testing",
+        "stage": "staging"
+    }
+    
+    # Return mapped environment or original if valid
+    if env in env_mapping:
+        return env_mapping[env]
+    elif env in ["production", "staging", "development", "testing"]:
+        return env
+    
+    # If no environment specified but we're on Render, default to production
+    if is_render_environment():
+        return "production"
+    
+    # Otherwise, default to development
+    return "development"
 
 
 def reload_config():

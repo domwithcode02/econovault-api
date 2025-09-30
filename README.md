@@ -1,5 +1,7 @@
 # EconoVault API
 
+> **⚠️ IMPORTANT**: This API requires external API keys from BLS, BEA, and FRED to function. See [DEPLOYMENT_SETUP.md](DEPLOYMENT_SETUP.md) for setup instructions.
+
 A minimal, GDPR-compliant economic data API built with FastAPI, designed for production deployment with strict file count and complexity constraints.
 
 ## Features
@@ -276,7 +278,9 @@ REDIS_URL=redis://localhost:6379
 SECRET_KEY=your-secret-key-here
 MASTER_ENCRYPTION_KEY=your-encryption-key-here
 
-# API Keys (for external data sources)
+# External Data Source API Keys (Required for Production)
+# These must be obtained from respective providers and set as environment variables
+# See DEPLOYMENT_SETUP.md for detailed instructions
 BLS_API_KEY=your-bls-api-key
 BEA_API_KEY=your-bea-api-key
 FRED_API_KEY=your-fred-api-key

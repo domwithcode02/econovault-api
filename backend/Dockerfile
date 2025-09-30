@@ -48,7 +48,7 @@ WORKDIR /app
 # Create logs directory with proper permissions
 RUN mkdir -p /app/logs && chown -R econovault:econovault /app
 
-# Copy application code with proper ownership
+# Copy application code with proper ownership (excluding .dockerignore patterns)
 COPY --chown=econovault:econovault . .
 
 # Make entrypoint script executable
@@ -58,10 +58,38 @@ RUN chmod +x /app/entrypoint.sh
 # Switch to non-root user
 USER econovault
 
-# Security: Set environment variables
+# Security: Set minimal environment variables (sensitive ones must be provided at runtime)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONHASHSEED=random
+    PYTHONHASHSEED=random \
+    ENVIRONMENT=production \
+    DEBUG=false \
+    LOG_LEVEL=INFO \
+    API_TITLE="EconoVault API" \
+    API_VERSION=1.0.0 \
+    API_DOCS_URL=/docs \
+    API_REDOC_URL=/redoc \
+    CORS_ALLOW_CREDENTIALS=true \
+    CORS_ALLOW_METHODS='["GET", "POST", "PUT", "DELETE", "OPTIONS"]' \
+    CORS_ALLOW_HEADERS='["*"]' \
+    LOG_FORMAT=json \
+    LOG_FILE=/app/logs/app.log \
+    LOG_MAX_BYTES=10485760 \
+    LOG_BACKUP_COUNT=5 \
+    ENABLE_METRICS=true \
+    METRICS_PORT=9090 \
+    HEALTH_CHECK_PATH=/health \
+    CACHE_TTL_SECONDS=300 \
+    CACHE_PREFIX=econovault:prod \
+    RUN_MIGRATIONS=true \
+    WAIT_FOR_DB=true \
+    ENABLE_REAL_DATA=true \
+    ENABLE_STREAMING=true \
+    ENABLE_GDPR_COMPLIANCE=true \
+    ENABLE_AUDIT_LOGGING=true \
+    HOT_RELOAD=false \
+    DEBUG_SQL=false \
+    PROFILING_ENABLED=false
 
 # Expose port
 EXPOSE 8000

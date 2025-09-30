@@ -8,6 +8,7 @@ import json
 import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Union, Any
+from enum import Enum
 from fastapi import Security, HTTPException, status, Depends
 from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -750,6 +751,223 @@ class GDPRCompliantJWTManager:
         }
 
 
+# Role-based access control (RBAC) definitions
+class UserRole(str, Enum):
+    """User roles for RBAC"""
+    ADMIN = "admin"
+    ANALYST = "analyst"
+    VIEWER = "viewer"
+
+
+class Permission(str, Enum):
+    """Permissions for different operations"""
+    # Indicator permissions
+    READ_INDICATORS = "read:indicators"
+    CREATE_INDICATORS = "create:indicators"
+    UPDATE_INDICATORS = "update:indicators"
+    DELETE_INDICATORS = "delete:indicators"
+    
+    # Data permissions
+    READ_DATA = "read:data"
+    EXPORT_DATA = "export:data"
+    
+    # User management permissions
+    MANAGE_USERS = "manage:users"
+    MANAGE_API_KEYS = "manage:api_keys"
+    
+    # System permissions
+    MANAGE_CACHE = "manage:cache"
+    VIEW_METRICS = "view:metrics"
+    MANAGE_ALERTS = "manage:alerts"
+    
+    # GDPR permissions
+    MANAGE_GDPR_REQUESTS = "manage:gdpr_requests"
+    VIEW_AUDIT_LOGS = "view:audit_logs"
+
+
+# Role-to-permission mapping
+ROLE_PERMISSIONS = {
+    UserRole.ADMIN: [
+        Permission.READ_INDICATORS,
+        Permission.CREATE_INDICATORS,
+        Permission.UPDATE_INDICATORS,
+        Permission.DELETE_INDICATORS,
+        Permission.READ_DATA,
+        Permission.EXPORT_DATA,
+        Permission.MANAGE_USERS,
+        Permission.MANAGE_API_KEYS,
+        Permission.MANAGE_CACHE,
+        Permission.VIEW_METRICS,
+        Permission.MANAGE_ALERTS,
+        Permission.MANAGE_GDPR_REQUESTS,
+        Permission.VIEW_AUDIT_LOGS,
+    ],
+    UserRole.ANALYST: [
+        Permission.READ_INDICATORS,
+        Permission.CREATE_INDICATORS,
+        Permission.UPDATE_INDICATORS,
+        Permission.READ_DATA,
+        Permission.EXPORT_DATA,
+        Permission.VIEW_METRICS,
+        Permission.MANAGE_GDPR_REQUESTS,
+        Permission.VIEW_AUDIT_LOGS,
+    ],
+    UserRole.VIEWER: [
+        Permission.READ_INDICATORS,
+        Permission.READ_DATA,
+        Permission.VIEW_METRICS,
+    ],
+}
+
+
+class RBACManager:
+    """Role-based access control manager"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+    
+    def get_user_permissions(self, roles: List[str]) -> List[str]:
+        """Get all permissions for given roles"""
+        permissions = set()
+        
+        for role in roles:
+            if isinstance(role, UserRole):
+                # Already an enum, use directly
+                role_enum = role
+            else:
+                # Convert string to enum
+                role_str = str(role)
+                try:
+                    role_enum = UserRole(role_str)
+                except ValueError:
+                    # Invalid role string, skip it
+                    continue
+            if role_enum in ROLE_PERMISSIONS:
+                permissions.update(ROLE_PERMISSIONS[role_enum])
+        
+        return list(permissions)
+    
+    def has_permission(self, user_permissions: List[str], required_permission: str) -> bool:
+        """Check if user has required permission"""
+        return required_permission in user_permissions
+    
+    def has_any_permission(self, user_permissions: List[str], required_permissions: List[str]) -> bool:
+        """Check if user has any of the required permissions"""
+        return any(perm in user_permissions for perm in required_permissions)
+    
+    def has_all_permissions(self, user_permissions: List[str], required_permissions: List[str]) -> bool:
+        """Check if user has all required permissions"""
+        return all(perm in user_permissions for perm in required_permissions)
+    
+    def require_permission(self, user_permissions: List[str], required_permission: str) -> None:
+        """Raise exception if user doesn't have required permission"""
+        if not self.has_permission(user_permissions, required_permission):
+            self.logger.warning(f"Permission denied: {required_permission} not in {user_permissions}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required: {required_permission}"
+            )
+    
+    def require_any_permission(self, user_permissions: List[str], required_permissions: List[str]) -> None:
+        """Raise exception if user doesn't have any of the required permissions"""
+        if not self.has_any_permission(user_permissions, required_permissions):
+            self.logger.warning(f"Permission denied: none of {required_permissions} in {user_permissions}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required any of: {', '.join(required_permissions)}"
+            )
+    
+    def require_all_permissions(self, user_permissions: List[str], required_permissions: List[str]) -> None:
+        """Raise exception if user doesn't have all required permissions"""
+        if not self.has_all_permissions(user_permissions, required_permissions):
+            self.logger.warning(f"Permission denied: not all of {required_permissions} in {user_permissions}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required all of: {', '.join(required_permissions)}"
+            )
+
+
+# Enhanced authentication dependencies with RBAC
+async def get_current_user_with_roles(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Dict:
+    """Get current user with role-based permissions"""
+    try:
+        payload = await jwt_auth.verify_token(token)
+        user_id = payload.get("sub", "").replace("user:", "")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication credentials"
+            )
+        
+        # Get user roles from token or database
+        roles = payload.get("roles", [])
+        if not roles:
+            # Default to viewer role if no roles specified
+            roles = [UserRole.VIEWER]
+        
+        # Get permissions based on roles
+        role_strings = [role.value if isinstance(role, UserRole) else str(role) for role in roles]
+        permissions = rbac_manager.get_user_permissions(role_strings)
+        
+        return {
+            "user_id": user_id,
+            "roles": roles,
+            "permissions": permissions,
+            "account_id": payload.get("account_id"),
+            "customer_id": payload.get("customer_id"),
+            "device_id": payload.get("device_id"),
+            "session_id": payload.get("session_id"),
+            "auth_type": "jwt"
+        }
+    except HTTPException:
+        raise
+
+
+def require_permission(permission: str):
+    """Dependency factory for requiring specific permissions"""
+    async def dependency(current_user: Dict = Depends(get_current_user_with_roles)) -> Dict:
+        rbac_manager.require_permission(current_user["permissions"], permission)
+        return current_user
+    return dependency
+
+
+def require_any_permission(*permissions: str):
+    """Dependency factory for requiring any of specific permissions"""
+    async def dependency(current_user: Dict = Depends(get_current_user_with_roles)) -> Dict:
+        rbac_manager.require_any_permission(current_user["permissions"], list(permissions))
+        return current_user
+    return dependency
+
+
+def require_all_permissions(*permissions: str):
+    """Dependency factory for requiring all specific permissions"""
+    async def dependency(current_user: Dict = Depends(get_current_user_with_roles)) -> Dict:
+        rbac_manager.require_all_permissions(current_user["permissions"], list(permissions))
+        return current_user
+    return dependency
+
+
+# Role-specific dependencies
+async def require_admin(current_user: Dict = Depends(get_current_user_with_roles)) -> Dict:
+    """Require admin role"""
+    if UserRole.ADMIN not in current_user["roles"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required"
+        )
+    return current_user
+
+
+async def require_analyst_or_admin(current_user: Dict = Depends(get_current_user_with_roles)) -> Dict:
+    """Require analyst or admin role"""
+    if UserRole.ADMIN not in current_user["roles"] and UserRole.ANALYST not in current_user["roles"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analyst or Admin role required"
+        )
+    return current_user
+
+
 # Initialize enhanced services
 key_manager = KeyManager()
 jwt_auth = EnhancedJWTAuth(key_manager)
@@ -757,6 +975,7 @@ token_revocation_manager = TokenRevocationManager(redis_client)
 gdpr_jwt_manager = GDPRCompliantJWTManager(jwt_auth, token_revocation_manager)
 api_key_auth = APIKeyAuth(redis_client)
 audit_logger = AuditLogger()
+rbac_manager = RBACManager()
 
 
 # Enhanced authentication dependencies

@@ -93,7 +93,7 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRES_PASSWORD: testpass
+          POSTGRES_PASSWORD: testpass_placeholder
           POSTGRES_DB: testdb
         options: >-
           --health-cmd pg_isready
@@ -161,7 +161,7 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRES_PASSWORD: testpass
+          POSTGRES_PASSWORD: testpass_placeholder
           POSTGRES_DB: integration_test
         options: >-
           --health-cmd pg_isready
@@ -212,7 +212,7 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRES_PASSWORD: testpass
+          POSTGRES_PASSWORD: testpass_placeholder
           POSTGRES_DB: api_test
         options: >-
           --health-cmd pg_isready
