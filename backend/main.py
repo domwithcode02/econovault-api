@@ -610,8 +610,8 @@ class LinkGenerator:
 if config.environment == "production":
     app.add_middleware(HTTPSRedirectMiddleware)
 
-# Input validation middleware
-app.add_middleware(InputValidationMiddleware, config=ValidationConfig())
+# Input validation middleware - TEMPORARILY DISABLED due to OpenAPI generation issues
+# app.add_middleware(InputValidationMiddleware, config=ValidationConfig())
 
 # CSRF protection middleware
 app.add_middleware(CSRFProtectionMiddleware, config=CSRFConfig())
