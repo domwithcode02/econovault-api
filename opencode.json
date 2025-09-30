@@ -9,11 +9,6 @@
         "headers": {
           "Authorization": "Bearer cpk_e33c3b855e25465f8834d72faef5efce.f638cc939c365cc1ae28b3563d8b1e40.WL5b4ICdNd9qiwRXJIRjGUelQGKNVjYI"
         }
-      },
-      "models": {
-        "zai-org/GLM-4.5-turbo": {
-          "name": "GLM 4.5 Turbo"
-        }
       }
     }
   },
@@ -40,6 +35,25 @@
       "enabled": true,
       "environment": {
         "NODE_ENV": "production"
+      }
+    },
+    "chrome-devtools": {
+      "type": "local",
+      "command": [
+        "npx",
+        "chrome-devtools-mcp@latest"
+      ],
+      "enabled": true,
+      "environment": {
+        "NODE_ENV": "production"
+      }
+    },
+    "render": {
+      "type": "remote",
+      "url": "https://mcp.render.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer rnd_s39tvR4Ha3plaK5OcugZiSmRUX1K"
       }
     }
   }

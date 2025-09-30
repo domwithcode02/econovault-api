@@ -304,3 +304,4 @@ docker-compose.backup.yml
 # --- System Files ---
 Thumbs.db
 Desktop.ini
+opencode.json
