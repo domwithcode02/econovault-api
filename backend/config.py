@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 class BaseConfig(BaseSettings):
     """Base configuration class with common settings"""
     
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"  # Ignore extra environment variables
+    )
+    
     # Application Settings
     app_name: str = "EconoVault API"
     app_version: str = "1.0.0"
@@ -63,49 +70,34 @@ class BaseConfig(BaseSettings):
     
     # Security Headers
     secure_headers: bool = Field(default=True)
-    cors_origins: List[str] = Field(default=["*"])
+    cors_origins: List[str] = Field(
+        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com"]
+    )
+    
+    # External API Keys (Optional - can be None for development)
+    bls_api_key: Optional[str] = Field(default=None, description="Bureau of Labor Statistics API key")
+    bea_api_key: Optional[str] = Field(default=None, description="Bureau of Economic Analysis API key") 
+    fred_api_key: Optional[str] = Field(default=None, description="Federal Reserve Economic Data API key")
+    
+    # GDPR Compliance Settings
+    gdpr_enabled: bool = Field(default=True, description="Enable GDPR compliance features")
+    data_retention_days: int = Field(default=2555, description="Number of days to retain user data (7 years)")
+    consent_expiry_days: int = Field(default=365, description="Number of days before consent expires")
     
     # Alerting Configuration
-    alerting_enabled: bool = Field(default=True)
-    slack_token: Optional[str] = Field(default=None)
-    slack_channel: str = Field(default="#alerts")
-    pagerduty_token: Optional[str] = Field(default=None)
-    pagerduty_routing_key: Optional[str] = Field(default=None)
-    alert_email_enabled: bool = Field(default=False)
-    alert_email_from: Optional[str] = Field(default=None)
-    alert_email_to: List[str] = Field(default_factory=list)
-    alert_smtp_host: str = Field(default="localhost")
-    alert_smtp_port: int = Field(default=587)
-    alert_smtp_username: Optional[str] = Field(default=None)
-    alert_smtp_password: Optional[str] = Field(default=None)
-    alert_smtp_use_tls: bool = Field(default=True)
-    
-    # External API Settings
-    bls_api_key: Optional[str] = Field(default=None)
-    bea_api_key: Optional[str] = Field(default=None)
-    fred_api_key: Optional[str] = Field(default=None)
-    
-    # GDPR Settings
-    gdpr_enabled: bool = Field(default=True)
-    data_retention_days: int = Field(default=2555)  # 7 years
-    consent_expiry_days: int = Field(default=365)
-    
-    # File Storage Settings
-    data_storage_path: str = Field(default="/app/data")
-    max_file_size_mb: int = Field(default=100)
-    
-    # Health Check Settings
-    health_check_timeout: int = Field(default=30)
-    
-    # Webhook Settings
-    webhook_timeout: int = Field(default=30)
-    webhook_retry_attempts: int = Field(default=3)
-    
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False
-    )
+    alerting_enabled: bool = Field(default=False, description="Enable alerting system")
+    slack_token: Optional[str] = Field(default=None, description="Slack bot token for alerts")
+    slack_channel: str = Field(default="#alerts", description="Slack channel for alerts")
+    pagerduty_token: Optional[str] = Field(default=None, description="PagerDuty API token")
+    pagerduty_routing_key: Optional[str] = Field(default=None, description="PagerDuty routing key")
+    alert_email_enabled: bool = Field(default=False, description="Enable email alerts")
+    alert_email_from: str = Field(default="noreply@econovault.com", description="From email address for alerts")
+    alert_email_to: str = Field(default="admin@econovault.com", description="To email address for alerts")
+    alert_smtp_host: str = Field(default="smtp.gmail.com", description="SMTP host for email alerts")
+    alert_smtp_port: int = Field(default=587, description="SMTP port for email alerts")
+    alert_smtp_username: Optional[str] = Field(default=None, description="SMTP username")
+    alert_smtp_password: Optional[str] = Field(default=None, description="SMTP password")
+    alert_smtp_use_tls: bool = Field(default=True, description="Use TLS for SMTP connections")
     
     @validator("environment")
     def validate_environment(cls, v):
@@ -126,6 +118,8 @@ class BaseConfig(BaseSettings):
     @field_validator("secret_key", "master_encryption_key")
     def validate_security_keys(cls, v, info):
         """Validate that security keys are not using default/insecure values"""
+        if v is None:
+            return v  # Allow None for development/testing
         if not v or len(v) < 32:
             raise ValueError(f"{info.field_name} must be at least 32 characters long")
         if "default" in v.lower() or "change-in-production" in v.lower():
@@ -136,7 +130,9 @@ class BaseConfig(BaseSettings):
     def parse_cors_origins(cls, v):
         """Parse CORS origins from comma-separated string"""
         if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
+            if not v.strip():  # Handle empty string
+                return ["*"]
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
 
 
@@ -186,7 +182,7 @@ class StagingConfig(BaseConfig):
     # Enable security headers
     secure_headers: bool = Field(default=True)
     cors_origins: List[str] = Field(
-        default=["https://staging.econovault.com", "https://staging-api.econovault.com"]
+        default=["https://econovault.com", "https://api.econovault.com", "https://econovault-api-2.onrender.com", "*"]
     )
     
     # Hide error details in staging
