@@ -975,49 +975,7 @@ def clear_cache():
 
 
 # Economic Data Endpoints
-@router.put(
-    "/indicators/{series_id}",
-    response_model=Dict[str, Any],
-    summary="Update economic indicator (full replacement)",
-    description="""
-    Update an existing economic indicator with full replacement of all fields.
-    
-    ## Authorization
-    Requires admin or analyst role to update indicators.
-    
-    ## Validation
-    - All required fields must be provided
-    - Date ranges must be valid if provided
-    - Series ID cannot be changed
-    
-    ## Example Usage
-    
-    ### Update an existing indicator
-    ```bash
-    curl -X PUT "https://api.econovault.com/v1/indicators/NEW_INDICATOR_001" \
-         -H "Authorization: Bearer your-token" \
-         -H "Content-Type: application/json" \
-         -d '{
-           "series_id": "NEW_INDICATOR_001",
-           "title": "Updated Economic Indicator",
-           "description": "An updated economic indicator",
-           "source": "BLS",
-           "indicator_type": "EMPLOYMENT",
-           "frequency": "MONTHLY",
-           "seasonal_adjustment": "SEASONALLY_ADJUSTED",
-           "geography_level": "NATIONAL",
-           "units": "Thousands of Persons"
-         }'
-    ```
-    
-    ## Response Format
-    Returns the updated indicator with metadata:
-    - All updated fields
-    - `last_updated`: Last update timestamp
-    """,
-    response_description="Updated economic indicator",
-    tags=["indicators"]
-)
+
 
 # Request models for indicator operations
 class IndicatorCreateRequest(BaseModel):
@@ -1200,43 +1158,7 @@ async def update_indicator(
         )
 
 
-@router.patch(
-    "/indicators/{series_id}",
-    response_model=Dict[str, Any],
-    summary="Update economic indicator (partial update)",
-    description="""
-    Update an existing economic indicator with partial field updates.
-    
-    ## Authorization
-    Requires admin or analyst role to update indicators.
-    
-    ## Validation
-    - Only provided fields will be updated
-    - Date ranges must be valid if provided
-    - Series ID cannot be changed
-    
-    ## Example Usage
-    
-    ### Partially update an indicator
-    ```bash
-    curl -X PATCH "https://api.econovault.com/v1/indicators/NEW_INDICATOR_001" \
-         -H "Authorization: Bearer your-token" \
-         -H "Content-Type: application/json" \
-         -d '{
-           "title": "Updated Economic Indicator",
-           "description": "An updated description",
-           "frequency": "QUARTERLY"
-         }'
-    ```
-    
-    ## Response Format
-    Returns the updated indicator with metadata:
-    - All updated fields
-    - `last_updated`: Last update timestamp
-    """,
-    response_description="Updated economic indicator",
-    tags=["indicators"]
-)
+
 @monitor_function(metric_name="patch_indicator", track_time=True, track_errors=True)
 async def patch_indicator(
     request: Request,
@@ -2983,19 +2905,265 @@ async def get_indicator_data(
         raise HTTPException(status_code=500, detail=f"Error fetching data: {str(e)}")
 
 
-# Enhanced Streaming Endpoints
-@router.get("/indicators/{series_id}/stream")
-async def stream_indicator_data(
-    series_id: str,
-    request: Request,
-    update_interval: int = 60  # Increased to 60 seconds to respect rate limits
-):
-    """Stream real-time updates for an economic indicator using Server-Sent Events."""
-    
-    # Create streamer instance
-    streamer = RealTimeDataStreamer()
-    return await streamer.stream_indicator_data(series_id, request, update_interval)
 
+
+
+# ============================================================================
+# SEMANTIC ECONOMIC INDICATOR ENDPOINTS
+# ============================================================================
+
+# Consumer Price Index (CPI) Endpoints
+@router.get(
+    "/indicators/consumer-price-index",
+    response_model=Dict[str, Any],
+    summary="Get Consumer Price Index",
+    description="""Get Consumer Price Index for All Urban Consumers (CPI-U).
+    
+    The CPI measures changes in the cost of a basket of goods and services
+    purchased by urban consumers. It's the most widely used measure of inflation.
+    
+    ## Data Source
+    Bureau of Labor Statistics (BLS) - Series ID: CUUR0000SA0""",
+    response_description="Consumer Price Index data",
+    tags=["indicators"]
+)
+async def get_consumer_price_index(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Get Consumer Price Index indicator information."""
+    return await get_indicator(request, "CUUR0000SA0", None, db)
+
+@router.get(
+    "/indicators/consumer-price-index/data",
+    response_model=Dict[str, Any],
+    summary="Get Consumer Price Index Time Series Data",
+    description="""Get historical time series data for Consumer Price Index.
+    
+    ## Data Features
+    - Real-time data from BLS
+    - Date filtering support
+    - Cursor-based pagination
+    - HTTP caching with ETags""",
+    response_description="CPI time series data",
+    tags=["indicators"]
+)
+async def get_consumer_price_index_data(
+    request: Request,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(100, description="Maximum data points"),
+    db: Session = Depends(get_db)
+):
+    """Get Consumer Price Index time series data."""
+    return await get_indicator_data(request, "CUUR0000SA0", start_date, end_date, None, None, None, CursorPaginationParams(first=limit, after=None, last=None, before=None), None, db)
+
+@router.get(
+    "/indicators/consumer-price-index/stream",
+    response_class=StreamingResponse,
+    summary="Stream Consumer Price Index Data",
+    description="""Stream real-time CPI data updates using Server-Sent Events.
+    
+    Provides continuous updates for Consumer Price Index data.""",
+    tags=["indicators"]
+)
+async def stream_consumer_price_index(
+    request: Request,
+    update_interval: int = 60
+):
+    """Stream Consumer Price Index data."""
+    streamer = RealTimeDataStreamer()
+    return await streamer.stream_indicator_data("CUUR0000SA0", request, update_interval)
+
+# Unemployment Rate Endpoints
+@router.get(
+    "/indicators/unemployment-rate",
+    response_model=Dict[str, Any],
+    summary="Get Unemployment Rate",
+    description="""Get national unemployment rate data.
+    
+    The unemployment rate represents the percentage of the labor force that is
+    unemployed but actively seeking employment.
+    
+    ## Data Source
+    Bureau of Labor Statistics (BLS) - Series ID: LNS14000000""",
+    response_description="Unemployment rate data",
+    tags=["indicators"]
+)
+async def get_unemployment_rate(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Get unemployment rate indicator information."""
+    return await get_indicator(request, "LNS14000000", None, db)
+
+@router.get(
+    "/indicators/unemployment-rate/data",
+    response_model=Dict[str, Any],
+    summary="Get Unemployment Rate Time Series Data",
+    description="""Get historical time series data for unemployment rate.
+    
+    ## Data Features
+    - Real-time data from BLS
+    - Date filtering support
+    - Cursor-based pagination
+    - HTTP caching with ETags""",
+    response_description="Unemployment rate time series data",
+    tags=["indicators"]
+)
+async def get_unemployment_rate_data(
+    request: Request,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(100, description="Maximum data points"),
+    db: Session = Depends(get_db)
+):
+    """Get unemployment rate time series data."""
+    return await get_indicator_data(request, "LNS14000000", start_date, end_date, None, None, None, CursorPaginationParams(first=limit, after=None, last=None, before=None), None, db)
+
+@router.get(
+    "/indicators/unemployment-rate/stream",
+    response_class=StreamingResponse,
+    summary="Stream Unemployment Rate Data",
+    description="""Stream real-time unemployment rate data updates using Server-Sent Events.
+    
+    Provides continuous updates for unemployment rate data.""",
+    tags=["indicators"]
+)
+async def stream_unemployment_rate(
+    request: Request,
+    update_interval: int = 60
+):
+    """Stream unemployment rate data."""
+    streamer = RealTimeDataStreamer()
+    return await streamer.stream_indicator_data("LNS14000000", request, update_interval)
+
+# Nonfarm Payrolls Endpoints
+@router.get(
+    "/indicators/nonfarm-payrolls",
+    response_model=Dict[str, Any],
+    summary="Get Nonfarm Payrolls",
+    description="""Get total nonfarm payroll employment data.
+    
+    Total nonfarm employees represents the number of paid workers in the U.S.
+    economy, excluding farm employees, private household employees, and non-profit
+    organization employees.
+    
+    ## Data Source
+    Bureau of Labor Statistics (BLS) - Series ID: CES0000000001""",
+    response_description="Nonfarm payroll employment data",
+    tags=["indicators"]
+)
+async def get_nonfarm_payrolls(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Get nonfarm payrolls indicator information."""
+    return await get_indicator(request, "CES0000000001", None, db)
+
+@router.get(
+    "/indicators/nonfarm-payrolls/data",
+    response_model=Dict[str, Any],
+    summary="Get Nonfarm Payrolls Time Series Data",
+    description="""Get historical time series data for nonfarm payrolls.
+    
+    ## Data Features
+    - Real-time data from BLS
+    - Date filtering support
+    - Cursor-based pagination
+    - HTTP caching with ETags""",
+    response_description="Nonfarm payrolls time series data",
+    tags=["indicators"]
+)
+async def get_nonfarm_payrolls_data(
+    request: Request,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(100, description="Maximum data points"),
+    db: Session = Depends(get_db)
+):
+    """Get nonfarm payrolls time series data."""
+    return await get_indicator_data(request, "CES0000000001", start_date, end_date, None, None, None, CursorPaginationParams(first=limit, after=None, last=None, before=None), None, db)
+
+@router.get(
+    "/indicators/nonfarm-payrolls/stream",
+    response_class=StreamingResponse,
+    summary="Stream Nonfarm Payrolls Data",
+    description="""Stream real-time nonfarm payrolls data updates using Server-Sent Events.
+    
+    Provides continuous updates for nonfarm payrolls data.""",
+    tags=["indicators"]
+)
+async def stream_nonfarm_payrolls(
+    request: Request,
+    update_interval: int = 60
+):
+    """Stream nonfarm payrolls data."""
+    streamer = RealTimeDataStreamer()
+    return await streamer.stream_indicator_data("CES0000000001", request, update_interval)
+
+# Real GDP Endpoints
+@router.get(
+    "/indicators/real-gdp",
+    response_model=Dict[str, Any],
+    summary="Get Real Gross Domestic Product",
+    description="""Get real Gross Domestic Product data.
+    
+    Real GDP measures the value of all goods and services produced in the U.S.,
+    adjusted for inflation. It's the primary measure of economic output.
+    
+    ## Data Source
+    Federal Reserve Economic Data (FRED) - Series ID: GDPC1""",
+    response_description="Real GDP data",
+    tags=["indicators"]
+)
+async def get_real_gdp(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Get real GDP indicator information."""
+    return await get_indicator(request, "GDPC1", None, db)
+
+@router.get(
+    "/indicators/real-gdp/data",
+    response_model=Dict[str, Any],
+    summary="Get Real GDP Time Series Data",
+    description="""Get historical time series data for real GDP.
+    
+    ## Data Features
+    - Real-time data from FRED
+    - Date filtering support
+    - Cursor-based pagination
+    - HTTP caching with ETags""",
+    response_description="Real GDP time series data",
+    tags=["indicators"]
+)
+async def get_real_gdp_data(
+    request: Request,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    limit: int = Query(100, description="Maximum data points"),
+    db: Session = Depends(get_db)
+):
+    """Get real GDP time series data."""
+    return await get_indicator_data(request, "GDPC1", start_date, end_date, None, None, None, CursorPaginationParams(first=limit, after=None, last=None, before=None), None, db)
+
+@router.get(
+    "/indicators/real-gdp/stream",
+    response_class=StreamingResponse,
+    summary="Stream Real GDP Data",
+    description="""Stream real-time GDP data updates using Server-Sent Events.
+    
+    Provides continuous updates for real GDP data.""",
+    tags=["indicators"]
+)
+async def stream_real_gdp(
+    request: Request,
+    update_interval: int = 60
+):
+    """Stream real GDP data."""
+    streamer = RealTimeDataStreamer()
+    return await streamer.stream_indicator_data("GDPC1", request, update_interval)
 
 # Cache management endpoints
 @router.post("/cache/clear")

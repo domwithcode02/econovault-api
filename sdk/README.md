@@ -42,13 +42,21 @@ with get_client("your-api-key") as client:
     indicators = client.get_indicators(source="BLS", limit=10)
     print(f"Found {len(indicators)} BLS indicators")
     
-    # Get CPI data
-    cpi_data = client.get_indicator_data("CUUR0000SA0", limit=12)
+    # Get CPI data using semantic endpoint (recommended)
+    cpi_data = client.get_indicator_data("CUUR0000SA0", limit=12)  # Maps to consumer-price-index
     print(f"Latest CPI: {cpi_data.data[-1].value}")
     
     # Get unemployment rate
-    unemployment = client.get_indicator("LNS14000000")
+    unemployment = client.get_indicator("LNS14000000")  # Maps to unemployment-rate
     print(f"Unemployment Rate: {unemployment.title}")
+    
+    # Alternative: Use semantic names directly via requests
+    import requests
+    semantic_response = requests.get(
+        f"{client.base_url}/v1/indicators/consumer-price-index/data",
+        headers={"Authorization": f"Bearer {client.api_key}"}
+    )
+    print(f"Semantic CPI: {semantic_response.json()}")
 ```
 
 ### Asynchronous Client
@@ -232,17 +240,41 @@ except EconoVaultError as e:
 
 ## Popular Series IDs
 
-### Consumer Price Index (CPI)
+### New Semantic Endpoints (Recommended)
+
+#### Consumer Price Index (CPI)
+- `/v1/indicators/consumer-price-index` - CPI metadata and latest data
+- `/v1/indicators/consumer-price-index/data` - CPI historical time series
+- `/v1/indicators/consumer-price-index/stream` - CPI real-time streaming
+
+#### Unemployment Rate
+- `/v1/indicators/unemployment-rate` - Unemployment metadata and latest data
+- `/v1/indicators/unemployment-rate/data` - Unemployment historical time series
+- `/v1/indicators/unemployment-rate/stream` - Unemployment real-time streaming
+
+#### Nonfarm Payrolls
+- `/v1/indicators/nonfarm-payrolls` - Payrolls metadata and latest data
+- `/v1/indicators/nonfarm-payrolls/data` - Payrolls historical time series
+- `/v1/indicators/nonfarm-payrolls/stream` - Payrolls real-time streaming
+
+#### Real GDP
+- `/v1/indicators/real-gdp` - Real GDP metadata and latest data
+- `/v1/indicators/real-gdp/data` - Real GDP historical time series
+- `/v1/indicators/real-gdp/stream` - Real GDP real-time streaming
+
+### Legacy Series IDs (Still Supported)
+
+#### Consumer Price Index (CPI)
 - `CUUR0000SA0`: CPI for All Urban Consumers
 - `CUUR0000SA0L1E`: Core CPI (All Items Less Food and Energy)
 - `CUUR0000SEEB01`: CPI for Energy Services
 
-### Employment Data
+#### Employment Data
 - `LNS14000000`: Unemployment Rate
 - `LNS12000000`: Employment Level
 - `LNS13000000`: Labor Force Participation Rate
 
-### Producer Price Index (PPI)
+#### Producer Price Index (PPI)
 - `PCUOMFGOMFG`: PPI for All Manufacturing Industries
 - `PCU325110325110`: PPI for Chemical Manufacturing
 
@@ -255,7 +287,7 @@ import pandas as pd
 from econovault import get_client
 
 with get_client("your-api-key") as client:
-    # Get CPI data
+    # Get CPI data (automatically uses semantic endpoint)
     cpi_data = client.get_indicator_data("CUUR0000SA0", limit=120)
     
     # Convert to DataFrame
@@ -270,6 +302,14 @@ with get_client("your-api-key") as client:
     df['yoy_change'] = df['value'].pct_change(periods=12) * 100
     
     print(df.tail())
+    
+    # Alternative: Use semantic endpoint directly
+    semantic_response = requests.get(
+        "https://api.econovault.com/v1/indicators/consumer-price-index/data",
+        headers={"Authorization": "Bearer your-api-key"}
+    )
+    semantic_data = semantic_response.json()
+    print(f"Semantic endpoint response: {semantic_data}")
 ```
 
 ### Real-time Streaming

@@ -65,29 +65,55 @@ Returns list of available economic indicators with filtering options.
 - `geography_level`: Geographic level (NATIONAL, STATE, etc.)
 - `limit`: Maximum number of results (1-1000)
 
-#### Get Specific Indicator
+#### Get Consumer Price Index
 ```http
-GET /v1/indicators/{series_id}
+GET /v1/indicators/consumer-price-index
 ```
 
-Returns detailed information about a specific economic indicator.
+Returns detailed information about the Consumer Price Index.
+
+#### Get Unemployment Rate
+```http
+GET /v1/indicators/unemployment-rate
+```
+
+Returns detailed information about the unemployment rate.
+
+#### Get Nonfarm Payrolls
+```http
+GET /v1/indicators/nonfarm-payrolls
+```
+
+Returns detailed information about nonfarm payroll employment.
+
+#### Get Real GDP
+```http
+GET /v1/indicators/real-gdp
+```
+
+Returns detailed information about real Gross Domestic Product.
 
 #### Get Indicator Data
 ```http
-GET /v1/indicators/{series_id}/data
+GET /v1/indicators/{indicator-name}/data
 ```
 
-Returns time series data for a specific indicator.
+Returns time series data for a specific economic indicator.
+
+**Available Indicators:**
+- `consumer-price-index`
+- `unemployment-rate`
+- `nonfarm-payrolls`
+- `real-gdp`
 
 **Query Parameters:**
 - `start_date`: Start date for data range (YYYY-MM-DD)
 - `end_date`: End date for data range (YYYY-MM-DD)
 - `limit`: Maximum number of data points (1-10000)
-- `format`: Response format (json, csv)
 
 #### Stream Indicator Data
 ```http
-GET /v1/indicators/{series_id}/stream
+GET /v1/indicators/{indicator-name}/stream
 ```
 
 Streams real-time updates using Server-Sent Events.
@@ -108,6 +134,141 @@ GET /v1/economic-calendar/stream
 ```
 
 Streams economic calendar events and announcements.
+
+### 🎯 Semantic Economic Indicators
+
+The EconoVault API provides clean, semantic endpoints for major economic indicators - no more cryptic series IDs needed!
+
+#### Available Indicators
+
+**Consumer Price Index**
+```http
+GET /v1/indicators/consumer-price-index
+GET /v1/indicators/consumer-price-index/data
+GET /v1/indicators/consumer-price-index/stream
+```
+
+**Unemployment Rate**
+```http
+GET /v1/indicators/unemployment-rate
+GET /v1/indicators/unemployment-rate/data
+GET /v1/indicators/unemployment-rate/stream
+```
+
+**Nonfarm Payrolls**
+```http
+GET /v1/indicators/nonfarm-payrolls
+GET /v1/indicators/nonfarm-payrolls/data
+GET /v1/indicators/nonfarm-payrolls/stream
+```
+
+**Real GDP**
+```http
+GET /v1/indicators/real-gdp
+GET /v1/indicators/real-gdp/data
+GET /v1/indicators/real-gdp/stream
+```
+
+#### Universal Data Access
+
+**Historical Data by Semantic Name**
+```http
+GET /v1/data/{alias_path}/historical
+```
+
+**Examples:**
+```bash
+# CPI historical data
+GET /v1/data/inflation/consumer-price-index/historical
+
+# Unemployment with date range
+GET /v1/data/employment/unemployment-rate/historical?start_date=2023-01-01&end_date=2023-12-31
+
+# Jobs data with limit
+GET /v1/data/jobs/nonfarm-payrolls/historical?limit=50
+```
+
+#### Simplified API Key Management
+
+**Create API Key**
+```http
+POST /v1/api-keys
+```
+*Alias for: `/v1/auth/api-keys`*
+
+**List API Keys**
+```http
+GET /v1/api-keys
+```
+*Alias for: `/v1/auth/api-keys`*
+
+**Delete API Key**
+```http
+DELETE /v1/api-keys/{key_id}
+```
+*Alias for: `/v1/auth/api-keys/{key_id}`*
+
+#### Category-Based Endpoints
+
+**All Inflation Indicators**
+```http
+GET /v1/categories/inflation/indicators
+```
+
+**All Employment Indicators**
+```http
+GET /v1/categories/employment/indicators
+```
+
+**All GDP Indicators**
+```http
+GET /v1/categories/gdp/indicators
+```
+
+**All Available Categories**
+```http
+GET /v1/categories
+```
+
+#### Benefits of Simplified Endpoints
+
+- **🔍 Self-Documenting**: URLs clearly indicate what data they provide
+- **🚀 RapidAPI Ready**: Perfect for marketplace deployment
+- **📚 Discoverable**: No need to memorize cryptic series IDs
+- **🔄 Backward Compatible**: All existing endpoints continue to work
+- **🎯 Developer-Friendly**: Clean, semantic naming conventions
+
+#### Migration Examples
+
+**Before (Cryptic):**
+```bash
+# Required memorizing CUUR0000SA0
+curl -H "X-API-Key: KEY" "https://api.econovault.com/v1/indicators/CUUR0000SA0/data"
+```
+
+**After (Simplified):**
+```bash
+# Clear, semantic endpoint
+curl -H "X-API-Key: KEY" "https://api.econovault.com/v1/inflation/consumer-price-index"
+```
+
+**SDK Usage (Python):**
+```python
+from econovault import EconoVaultClient
+
+client = EconoVaultClient(api_key="your_key")
+
+# Simplified methods (recommended)
+cpi_data = client.get_cpi_data()
+unemployment_data = client.get_unemployment_data()
+gdp_data = client.get_gdp_data()
+
+# Universal method
+inflation_data = client.get_historical_data_by_alias("inflation/consumer-price-index")
+
+# Original methods still work
+cpi_data_original = client.get_indicator_data("CUUR0000SA0")
+```
 
 ### GDPR Compliance
 

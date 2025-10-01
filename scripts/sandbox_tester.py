@@ -13,6 +13,7 @@ import random
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+from collections.abc import Callable
 import concurrent.futures
 import argparse
 import sys
@@ -45,7 +46,7 @@ class TestCase:
     data: Optional[Dict] = None
     expected_status: int = 200
     expected_fields: Optional[List[str]] = None
-    validation_func: Optional[callable] = None
+    validation_func: Optional[Callable[[Dict], bool]] = None
 
 
 class SandboxTester:
@@ -61,7 +62,7 @@ class SandboxTester:
             'Accept': 'application/json',
             'Content-Type': 'application/json'
         })
-        self.test_results = []
+        self.test_results: List[Dict[str, Any]] = []
         self.start_time = datetime.now()
         
         logger.info(f"Sandbox tester initialized for {base_url}")
@@ -219,7 +220,7 @@ class SandboxTester:
         
         return "\n".join(report)
     
-    def save_report(self, summary: Dict[str, Any], filename: str = None):
+    def save_report(self, summary: Dict[str, Any], filename: str | None = None):
         """Save test report to file"""
         if filename is None:
             filename = f"sandbox_test_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -321,10 +322,10 @@ def create_test_suite() -> List[TestCase]:
             validation_func=lambda data: isinstance(data, list) and len(data) <= 3
         ),
         
-        TestCase(
-            name="Get Specific Indicator",
-            description="Test getting specific indicator by series ID",
-            endpoint="v1/indicators/CUUR0000SA0",
+TestCase(
+            name="Get Consumer Price Index",
+            description="Test getting CPI indicator",
+            endpoint="v1/indicators/consumer-price-index",
             expected_fields=["series_id", "title", "source", "indicator_type"],
             validation_func=validate_indicator_data
         ),
@@ -336,27 +337,27 @@ def create_test_suite() -> List[TestCase]:
             expected_status=404
         ),
         
-        # Data endpoints
+# Data endpoints
         TestCase(
-            name="Get Indicator Data",
-            description="Test getting time series data",
-            endpoint="v1/indicators/CUUR0000SA0/data",
+            name="Get CPI Data",
+            description="Test getting CPI time series data",
+            endpoint="v1/indicators/consumer-price-index/data",
             expected_fields=["series_id", "title", "source", "data", "count"],
             validation_func=validate_time_series_data
         ),
         
         TestCase(
-            name="Get Indicator Data with Limit",
-            description="Test data endpoint with limit parameter",
-            endpoint="v1/indicators/CUUR0000SA0/data",
+            name="Get Unemployment Data with Limit",
+            description="Test unemployment data endpoint with limit parameter",
+            endpoint="v1/indicators/unemployment-rate/data",
             params={"limit": 5},
             validation_func=lambda data: isinstance(data["data"], list) and len(data["data"]) <= 5
         ),
         
         TestCase(
-            name="Get Indicator Data with Date Range",
-            description="Test data endpoint with date range",
-            endpoint="v1/indicators/CUUR0000SA0/data",
+            name="Get Nonfarm Payrolls Data with Date Range",
+            description="Test nonfarm payrolls data endpoint with date range",
+            endpoint="v1/indicators/nonfarm-payrolls/data",
             params={"start_date": "2023-01-01", "end_date": "2023-12-31"},
             validation_func=validate_time_series_data
         ),

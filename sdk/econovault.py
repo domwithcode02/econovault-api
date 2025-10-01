@@ -249,7 +249,7 @@ class EconoVaultClient:
             
         Returns:
             List of EconomicIndicator objects
-        """
+"""
         params: Dict[str, Union[int, str]] = {"limit": limit}
         if source:
             params["source"] = source
@@ -270,24 +270,24 @@ class EconoVaultClient:
         logger.info(f"Retrieved {len(indicators)} indicators")
         return indicators
     
-    def get_indicator(self, series_id: str) -> EconomicIndicator:
+    def get_indicator(self, indicator_name: str) -> EconomicIndicator:
         """
-        Get specific economic indicator by series ID.
+        Get specific economic indicator by semantic name.
         
         Args:
-            series_id: The series ID (e.g., 'CUUR0000SA0' for CPI)
+            indicator_name: The indicator name (e.g., 'consumer-price-index' for CPI)
             
         Returns:
             EconomicIndicator object
         """
-        response = self._make_request("GET", f"indicators/{series_id}")
+        response = self._make_request("GET", f"indicators/{indicator_name}")
         
-        logger.info(f"Retrieved indicator {series_id}")
+        logger.info(f"Retrieved indicator {indicator_name}")
         return EconomicIndicator(**response)
     
     def get_indicator_data(
         self,
-        series_id: str,
+        indicator_name: str,
         start_date: Optional[Union[str, date, datetime]] = None,
         end_date: Optional[Union[str, date, datetime]] = None,
         limit: int = 1000
@@ -296,14 +296,14 @@ class EconoVaultClient:
         Get time series data for a specific indicator.
         
         Args:
-            series_id: The series ID
+            indicator_name: The indicator name (e.g., 'consumer-price-index')
             start_date: Start date for data range (string, date, or datetime)
             end_date: End date for data range (string, date, or datetime)
             limit: Maximum number of data points to return
             
         Returns:
             TimeSeriesData object
-"""
+        """
         params: Dict[str, Union[int, str]] = {"limit": limit}
         
         if start_date:
@@ -318,9 +318,9 @@ class EconoVaultClient:
             else:
                 params["end_date"] = end_date
         
-        response = self._make_request("GET", f"indicators/{series_id}/data", params=params)
+        response = self._make_request("GET", f"indicators/{indicator_name}/data", params=params)
         
-        # Convert data points
+# Convert data points
         data_points = []
         for item in response["data"]:
             data_points.append(DataPoint(**item))
@@ -335,7 +335,7 @@ class EconoVaultClient:
             date_range=response["date_range"]
         )
         
-        logger.info(f"Retrieved {len(data_points)} data points for {series_id}")
+        logger.info(f"Retrieved {len(data_points)} data points for {indicator_name}")
         return time_series
     
     def stream_indicator_data(
