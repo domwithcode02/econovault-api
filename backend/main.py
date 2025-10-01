@@ -44,6 +44,11 @@ from monitoring import init_monitoring, get_monitoring, monitor_function
 
 # Import core components
 from bls_client import BLSClient, BLSAPIException
+from bea_client import BEAClient, BEAAPIException
+from fred_client import FREDClient, FREDAPIException
+from data_source_factory import data_source_factory, data_source_router
+from data_normalizer import data_normalizer
+from unified_models import UnifiedSeriesResponse, UnifiedIndicator
 from database import get_db, Session, DatabaseManager, EconomicIndicator, DataPoint, APIKey
 from security import (
     get_current_user_optional, get_current_user, 
@@ -86,14 +91,52 @@ error_handler = ErrorHandler()
 # Initialize logger
 logger = logging.getLogger(__name__)
 
-# Initialize BLS client
-bls_api_key = os.getenv('BLS_API_KEY')
-if not bls_api_key:
-    logger.warning("BLS_API_KEY not found in environment variables")
-bls_client = BLSClient(api_key=bls_api_key)
+
+def _create_empty_data_response(series_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Create empty data response for when no data is available"""
+    return {
+        "data": {
+            "edges": [],
+            "page_info": {
+                "has_next_page": False,
+                "has_previous_page": False,
+                "start_cursor": None,
+                "end_cursor": None
+            },
+            "series_metadata": metadata,
+            "date_range": {
+                "start": None,
+                "end": None
+            }
+        }
+    }
 
 # Get configuration
 config = get_config()
+
+# Initialize BLS client
+if config.bls_api_key:
+    bls_client = BLSClient(api_key=config.bls_api_key)
+    logger.info("BLS client initialized")
+else:
+    bls_client: Optional[BLSClient] = None
+    logger.warning("BLS_API_KEY not found in environment variables")
+
+# Initialize BEA client
+if config.bea_api_key:
+    bea_client = BEAClient(api_key=config.bea_api_key)
+    logger.info("BEA client initialized")
+else:
+    bea_client = None
+    logger.warning("BEA_API_KEY not found in environment variables")
+
+# Initialize FRED client
+if config.fred_api_key:
+    fred_client = FREDClient(api_key=config.fred_api_key)
+    logger.info("FRED client initialized")
+else:
+    fred_client = None
+    logger.warning("FRED_API_KEY not found in environment variables")
 
 # Initialize alerting service
 if config.alerting_enabled:
@@ -180,8 +223,9 @@ else:
     
     logger.info("Monitoring system initialized")
 
-# Initialize streaming
-streamer = RealTimeDataStreamer(bls_client)
+# Initialize streaming with multi-source support
+from streaming import initialize_streaming
+initialize_streaming()
 
 # Thread pool for running sync BLS API calls
 executor = ThreadPoolExecutor(max_workers=4)
@@ -730,8 +774,9 @@ async def api_error_monitoring(request: Request, call_next):
 # Create main router
 router = APIRouter(prefix="/v1", tags=["api"])
 
-# Popular BLS series IDs with metadata
+# Popular economic indicators with metadata from all sources
 popular_series = {
+    # BLS Series
     "CUUR0000SA0": {
         "series_id": "CUUR0000SA0",
         "title": "Consumer Price Index for All Urban Consumers",
@@ -761,6 +806,80 @@ popular_series = {
         "seasonal_adjustment": "SEASONALLY_ADJUSTED",
         "geography_level": "NATIONAL",
         "units": "Thousands of Persons"
+    },
+    
+    # FRED Series
+    "GDPC1": {
+        "series_id": "GDPC1",
+        "title": "Real Gross Domestic Product",
+        "source": "FRED",
+        "indicator_type": "GDP",
+        "frequency": "QUARTERLY",
+        "seasonal_adjustment": "SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Billions of Chained 2012 Dollars"
+    },
+    "UNRATE": {
+        "series_id": "UNRATE",
+        "title": "Unemployment Rate",
+        "source": "FRED",
+        "indicator_type": "UNEMPLOYMENT",
+        "frequency": "MONTHLY",
+        "seasonal_adjustment": "SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Percent"
+    },
+    "CPIAUCSL": {
+        "series_id": "CPIAUCSL",
+        "title": "Consumer Price Index for All Urban Consumers",
+        "source": "FRED",
+        "indicator_type": "CPI",
+        "frequency": "MONTHLY",
+        "seasonal_adjustment": "SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Index 1982-1984=100"
+    },
+    "FEDFUNDS": {
+        "series_id": "FEDFUNDS",
+        "title": "Federal Funds Effective Rate",
+        "source": "FRED",
+        "indicator_type": "INTEREST_RATE",
+        "frequency": "MONTHLY",
+        "seasonal_adjustment": "NOT_SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Percent"
+    },
+    
+    # BEA Series (using table names)
+    "T10101": {
+        "series_id": "T10101",
+        "title": "Real Gross Domestic Product",
+        "source": "BEA",
+        "indicator_type": "GDP",
+        "frequency": "QUARTERLY",
+        "seasonal_adjustment": "SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Billions of Dollars"
+    },
+    "A191RX": {
+        "series_id": "A191RX",
+        "title": "Real Personal Income",
+        "source": "BEA",
+        "indicator_type": "PERSONAL_INCOME",
+        "frequency": "QUARTERLY",
+        "seasonal_adjustment": "SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Billions of Dollars"
+    },
+    "T20100": {
+        "series_id": "T20100",
+        "title": "Personal Income",
+        "source": "BEA",
+        "indicator_type": "PERSONAL_INCOME",
+        "frequency": "QUARTERLY",
+        "seasonal_adjustment": "NOT_SEASONALLY_ADJUSTED",
+        "geography_level": "NATIONAL",
+        "units": "Billions of Dollars"
     }
 }
 
@@ -779,7 +898,7 @@ class APIErrorHandler:
             try:
                 # Run synchronous BLS API call in thread pool
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(executor, func, *args, **kwargs)
+                result = await loop.run_in_executor(None, func, *args, **kwargs)
                 return result
                 
             except BLSAPIException as e:
@@ -828,6 +947,9 @@ api_error_handler = APIErrorHandler()
 def get_cached_indicator_data(series_id: str, start_year: Optional[int] = None, end_year: Optional[int] = None):
     """Cache indicator data to reduce API calls"""
     try:
+        if bls_client is None:
+            logger.warning("BLS client not available")
+            return pd.DataFrame()
         return bls_client.get_series_data(series_id, start_year=start_year, end_year=end_year)
     except Exception as e:
         logger.error(f"Error fetching cached data for {series_id}: {str(e)}")
@@ -837,6 +959,9 @@ def get_cached_indicator_data(series_id: str, start_year: Optional[int] = None, 
 def get_cached_latest_data(series_id: str):
     """Cache latest indicator data"""
     try:
+        if bls_client is None:
+            logger.warning("BLS client not available")
+            return pd.DataFrame()
         return bls_client.get_latest_data(series_id)
     except Exception as e:
         logger.error(f"Error fetching cached latest data for {series_id}: {str(e)}")
@@ -1387,7 +1512,7 @@ async def create_indicator(
             expected_type="string",
             constraint="min_length=3",
             suggestions=["Use a series ID with at least 3 characters"]
-        )
+)
         error_response = create_validation_error_response([field_error], request)
         return JSONResponse(
             status_code=error_response.status_code,
@@ -1668,15 +1793,15 @@ async def get_indicators(
             parser = FilterParser()
             filter_group = parser.parse_filter_string(filter_param)
             
-            # Validate against allowed fields
+# Validate against allowed fields
             validator = FilterValidator(EconomicDataFilterConfig.INDICATOR_FIELDS)
             validator.validate_filter_group(filter_group)
             
             filter_summary = {
-                "filter_applied": True,
-                "filter_expression": filter_param[:200] + "..." if len(filter_param) > 200 else filter_param
-            }
-            
+                    "filter_applied": True,
+                    "filter_expression": filter_param[:200] + "..." if len(filter_param) > 200 else filter_param
+}
+                
         except ValueError as e:
             field_error = FieldError(
                 field="filter",
@@ -2146,19 +2271,98 @@ async def get_indicator(
         labels={"endpoint": "get_indicator", "method": "GET", "status": "200", "indicator": series_id}
     )
     
-    # Get latest data from BLS API with error handling
+# Get latest data from appropriate source API with error handling
     try:
-        latest_data = await error_handler.handle_bls_call(bls_client.get_latest_data, series_id)
+        # Determine data source for series_id
+        source = data_source_router.get_source_for_series_id(series_id)
+        if not source:
+            raise HTTPException(status_code=404, detail=f"Indicator {series_id} not found")
         
-        if not latest_data.empty:
-            latest_point = {
-                "date": latest_data.iloc[0]['date'].strftime('%Y-%m-%d'),
-                "value": float(latest_data.iloc[0]['value']),
-                "period": latest_data.iloc[0]['period'],
-                "period_name": latest_data.iloc[0]['period_name']
-            }
+        # Get appropriate client
+        client = data_source_factory.create_client(source)
+        latest_data = None
+        
+        if source == DataSource.BLS:
+            # Use existing BLS error handler
+            bls_client: BLSClient = client  # Ensure correct type
+            latest_data = await error_handler.handle_bls_call(bls_client.get_latest_data, series_id)
+            
+            if not latest_data.empty:
+                latest_point = {
+                    "date": latest_data.iloc[0]['date'].strftime('%Y-%m-%d'),
+                    "value": float(latest_data.iloc[0]['value']),
+                    "period": latest_data.iloc[0]['period'],
+                    "period_name": latest_data.iloc[0]['period_name']
+                }
+            else:
+                latest_point = None
+                
+        elif source == DataSource.FRED:
+            # Get latest data from FRED
+            try:
+                fred_client: FREDClient = client  # type: ignore
+                raw_data = fred_client.get_series_data(
+                    series_ids=series_id,
+                    limit=1,
+                    sort_order='desc'
+                )
+                
+                if raw_data and 'observations' in raw_data and raw_data['observations']:
+                    obs = raw_data['observations'][0]
+                    latest_point = {
+                        "date": obs['date'],
+                        "value": obs['value'],
+                        "period": obs['date'][:7],  # YYYY-MM format
+                        "period_name": obs['date']
+                    }
+                else:
+                    latest_point = None
+                    
+            except Exception as e:
+                logger.error(f"FRED API error fetching latest data for {series_id}: {str(e)}")
+                latest_point = None
+                
+        elif source == DataSource.BEA:
+            # Get latest data from BEA
+            try:
+                current_year = datetime.now().year
+                bea_client: BEAClient = client  # type: ignore
+                raw_data = bea_client.get_series_data(
+                    table_name=series_id,
+                    frequency='A',  # Annual frequency
+                    year=str(current_year)
+                )
+                
+                if raw_data and 'BEAAPI' in raw_data:
+                    bea_data = raw_data['BEAAPI']['Results'].get('Data', [])
+                    if bea_data:
+                        latest_item = bea_data[-1]
+                        time_period = latest_item.get('TimePeriod', '')
+                        
+                        if len(time_period) == 4:  # Year
+                            date_str = f"{time_period}-12-31"
+                        else:
+                            date_str = time_period
+                        
+                        latest_point = {
+                            "date": date_str,
+                            "value": latest_item.get('DataValue', ''),
+                            "period": time_period,
+                            "period_name": time_period
+                        }
+                    else:
+                        latest_point = None
+                else:
+                    latest_point = None
+                    
+            except Exception as e:
+                logger.error(f"BEA API error fetching latest data for {series_id}: {str(e)}")
+                latest_point = None
+        
         else:
             latest_point = None
+        
+
             
     except HTTPException:
         # Re-raise HTTP exceptions
@@ -2341,13 +2545,75 @@ async def get_indicator_data(
     db: Session = Depends(get_db)
 ):
     """Get time series data for a specific indicator with cursor-based pagination and filtering."""
-    # Check if series is in our popular series list
-    if series_id not in popular_series:
+    
+    # Determine data source for series_id
+    source = data_source_router.get_source_for_series_id(series_id)
+    if not source:
         error_response = create_not_found_error_response("Indicator", series_id, request)
         return JSONResponse(
-            status_code=error_response.status_code,
-            content=error_response.dict(exclude_none=True)
+        status_code=error_response.status_code,
+        content=error_response.dict(exclude_none=True)
         )
+    
+    # Check if we have metadata for this series (for backward compatibility)
+    if series_id not in popular_series:
+        # Try to fetch series info from the appropriate source
+        try:
+            client = data_source_factory.create_client(source)
+            
+            # Add type hints for Pylance BEFORE using the client
+            if source == DataSource.FRED:
+                client: FREDClient = client  # type: ignore
+            elif source == DataSource.BEA:
+                client: BEAClient = client  # type: ignore
+            elif source == DataSource.BLS:
+                client: BLSClient = client   # type: ignore
+            
+            if hasattr(client, 'get_series_info'):
+                series_info = client.get_series_info(series_id)  # type: ignore
+            elif hasattr(client, 'get_series_data'):
+                # For BLS, use get_series_data to get basic info
+                try:
+                    bls_client: BLSClient = client  # Ensure correct type
+                    data = bls_client.get_series_data(series_ids=series_id, catalog=True)
+                    if not data.empty:
+                        series_info = {
+                            'title': series_id,
+                            'description': f"BLS economic indicator {series_id}",
+                            'frequency': 'Monthly' if 'M' in series_id else 'Annual'
+                        }
+                    else:
+                        series_info = None
+                except Exception:
+                    series_info = None
+            else:
+                series_info = None
+                # Create a basic metadata entry
+                popular_series[series_id] = {
+                    "series_id": series_id,
+                    "title": series_info.get('title', series_id) if series_info else series_id,
+                    "description": series_info.get('description', f"Economic indicator {series_id}") if series_info else f"Economic indicator {series_id}",
+                    "source": source.value,
+                    "indicator_type": "GENERAL",
+                    "frequency": "M",
+                    "seasonal_adjustment": "NSA",
+                    "geography_level": "NATIONAL",
+                    "units": "Index"
+                }
+        except Exception as e:
+            logger.warning(f"Could not fetch series info for {series_id}: {str(e)}")
+            # Still proceed with basic metadata
+            popular_series[series_id] = {
+                "series_id": series_id,
+                "title": series_id,
+                "description": f"Economic indicator {series_id}",
+                "source": source.value,
+                "indicator_type": "GENERAL",
+                "frequency": "M",
+                "seasonal_adjustment": "NSA",
+                "geography_level": "NATIONAL",
+                "units": "Index"
+            }
     
     # Log access if user is authenticated
     if current_user:
@@ -2372,7 +2638,7 @@ async def get_indicator_data(
             logger.info(f"Cache hit for indicator data: {series_id}")
             data_points = cached_data["data_points"]
         else:
-            # Parse start and end years from date strings
+# Parse start and end years from date strings
             start_year = None
             end_year = None
             start_dt = None
@@ -2381,47 +2647,143 @@ async def get_indicator_data(
             if start_date:
                 start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
                 start_year = start_dt.year
-            
+             
             if end_date:
                 end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
                 end_year = end_dt.year
             
-            # Get data from BLS API with error handling
-            data_df = await error_handler.handle_bls_call(
-                bls_client.get_series_data,
-                series_id, 
-                start_year=start_year, 
-                end_year=end_year
-            )
+            # Get data from appropriate source API with error handling
+            # Create client with explicit type handling
+            if source == DataSource.FRED:
+                client: FREDClient = data_source_factory.create_client(source)  # type: ignore
+            elif source == DataSource.BEA:
+                client: BEAClient = data_source_factory.create_client(source)  # type: ignore
+            elif source == DataSource.BLS:
+                client: BLSClient = data_source_factory.create_client(source)   # type: ignore
+            else:
+                client = data_source_factory.create_client(source)
             
-            if data_df.empty:
-                return {
-                    "data": {
-                        "edges": [],
-                        "page_info": {
-                            "has_next_page": False,
-                            "has_previous_page": False,
-                            "start_cursor": None,
-                            "end_cursor": None
-                        },
-                        "series_metadata": popular_series[series_id],
-                        "date_range": {
-                            "start": None,
-                            "end": None
-                        }
+            if source == DataSource.BLS:
+                # BLS uses DataFrame and year-based filtering
+                data_df = await error_handler.handle_bls_call(
+                    client.get_series_data,
+                    series_id, 
+                    start_year=start_year, 
+                    end_year=end_year
+                )
+                
+                if data_df.empty:
+                    return _create_empty_data_response(series_id, popular_series[series_id])
+                
+                # Convert BLS DataFrame to list of dictionaries
+                data_points = []
+                for _, row in data_df.iterrows():
+                    point = {
+                        "date": row['date'].strftime('%Y-%m-%d'),
+                        "value": float(row['value']) if pd.notna(row['value']) else None,
+                        "period": row['period'],
+                        "period_name": row['period_name'],
+                        "source": "BLS"
                     }
-                }
+                    data_points.append(point)
+                
+            elif source == DataSource.BEA:
+                # BEA uses different API structure
+                try:
+                    bea_client = client  # type: ignore  # BEAClient
+                    raw_data = bea_client.get_series_data(  # type: ignore
+                        series_id,  # Use series_id instead of table_name
+                        start_year=start_year,
+                        end_year=end_year
+                    )
+                    
+                    if raw_data.empty or 'BEAAPI' not in raw_data:
+                        return _create_empty_data_response(series_id, popular_series[series_id])
+                    
+                    # Normalize BEA data to expected format
+                    data_points = []
+                    bea_data = raw_data['BEAAPI']['Results'].get('Data', [])
+                    
+                    for item in bea_data:
+                        try:
+                            # Parse BEA date format
+                            time_period = item.get('TimePeriod', '')
+                            if len(time_period) == 4:  # Year
+                                date_str = f"{time_period}-12-31"
+                            elif 'Q' in time_period:  # Quarter
+                                year, quarter = time_period.split('Q')
+                                month = int(quarter) * 3
+                                date_str = f"{year}-{month:02d}-01"
+                            else:
+                                continue
+                            
+                            value = item.get('DataValue', '')
+                            if value and value not in ['', '..', 'NA']:
+                                point = {
+                                    "date": date_str,
+                                    "value": float(value.replace(',', '')) if value.replace(',', '').replace('.', '').isdigit() else value,
+                                    "period": time_period,
+                                    "period_name": time_period,
+                                    "source": "BEA"
+                                }
+                                data_points.append(point)
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    if not data_points:
+                        return _create_empty_data_response(series_id, popular_series[series_id])
+                        
+                except Exception as e:
+                    logger.error(f"BEA data retrieval failed: {str(e)}")
+                    return _create_empty_data_response(series_id, popular_series[series_id])
+                
+            elif source == DataSource.FRED:
+                # FRED uses date-based filtering
+                try:
+                    fred_client = client  # type: ignore  # FREDClient
+                    # Convert dates to years for BLS
+                    start_year = None
+                    end_year = None
+                    if start_date:
+                        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                        start_year = start_dt.year
+                    if end_date:
+                        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                        end_year = end_dt.year
+                    
+                    raw_data = fred_client.get_series_data(  # type: ignore
+                        series_ids=series_id,
+                        start_year=start_year,
+                        end_year=end_year
+                    )
+                    
+                    if raw_data.empty or raw_data.empty:
+                        return _create_empty_data_response(series_id, popular_series[series_id])
+                    
+                    # Convert FRED observations to expected format
+                    data_points = []
+                    for obs in raw_data['observations']:
+                        try:
+                            point = {
+                                "date": obs['date'],
+                                "value": float(obs['value']) if obs['value'] and obs['value'] not in ['.', 'NA'] else None,
+                                "period": obs['date'][:7],  # YYYY-MM format
+                                "period_name": obs['date'],
+                                "source": "FRED"
+                            }
+                            data_points.append(point)
+                        except (ValueError, TypeError):
+                            continue
+                            
+                    if not data_points:
+                        return _create_empty_data_response(series_id, popular_series[series_id])
+                        
+                except Exception as e:
+                    logger.error(f"FRED data retrieval failed: {str(e)}")
+                    return _create_empty_data_response(series_id, popular_series[series_id])
             
-            # Convert DataFrame to list of dictionaries
-            data_points = []
-            for _, row in data_df.iterrows():
-                point = {
-                    "date": row['date'].strftime('%Y-%m-%d'),
-                    "value": float(row['value']) if pd.notna(row['value']) else None,
-                    "period": row['period'],
-                    "period_name": row['period_name']
-                }
-                data_points.append(point)
+            else:
+                raise Exception(f"Unsupported data source: {source}")
             
             # Apply date filtering more precisely
             if start_date or end_date:
@@ -2524,7 +2886,7 @@ async def get_indicator_data(
         # Apply cursor pagination manually since we have the data in memory
         # For production, this would be done at the database level
         
-        # Decode cursor if provided
+# Decode cursor if provided
         after_cursor = None
         before_cursor = None
         
@@ -2541,18 +2903,18 @@ async def get_indicator_data(
         
         if after_cursor:
             # Get items after the cursor date
-            cursor_date = after_cursor.value
+            cursor_date: Optional[Union[str, int, datetime]] = after_cursor.value
             if isinstance(cursor_date, str):
                 cursor_date = datetime.fromisoformat(cursor_date)
             elif isinstance(cursor_date, int):
-                # Skip filtering if cursor_date is an int (can't compare datetime with int)
+# Skip filtering if cursor_date is an int (can't compare datetime with int)
                 cursor_date = None
-            if cursor_date:
-                filtered_data = [point for point in filtered_data if datetime.fromisoformat(point["date"]) < cursor_date]
+                if cursor_date:
+                    filtered_data = [point for point in filtered_data if datetime.fromisoformat(point["date"]) < cursor_date]
         
         if before_cursor:
             # Get items before the cursor date
-            cursor_date = before_cursor.value
+            cursor_date: Optional[Union[str, int, datetime]] = before_cursor.value
             if isinstance(cursor_date, str):
                 cursor_date = datetime.fromisoformat(cursor_date)
             elif isinstance(cursor_date, int):
@@ -2630,6 +2992,8 @@ async def stream_indicator_data(
 ):
     """Stream real-time updates for an economic indicator using Server-Sent Events."""
     
+    # Create streamer instance
+    streamer = RealTimeDataStreamer()
     return await streamer.stream_indicator_data(series_id, request, update_interval)
 
 

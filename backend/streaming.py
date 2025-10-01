@@ -9,18 +9,66 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Set
+from datetime import datetime
+from typing import Dict, Any, Optional, Set, Protocol, Union, List, Type
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 import pandas as pd
 
-from bls_client import BLSClient, BLSAPIException
-from database import get_db, DatabaseManager
-from models import EconomicIndicatorType
+from data_source_factory import data_source_factory, data_source_router
+from models import DataSource
+
+# Protocol definitions for type-safe client interfaces
+class DataClient(Protocol):
+    """Protocol for all data clients"""
+    def get_series_data(self, *args, **kwargs) -> Dict[str, Any]: ...
+
+class FREDClientProtocol(DataClient, Protocol):
+    """Protocol for FRED client with specific method signature"""
+    def get_series_data(self, series_ids: Union[str, List[str]], 
+                       limit: Optional[int] = None,
+                       sort_order: str = 'asc', **kwargs) -> Dict[str, Any]: ...
+
+class BEAClientProtocol(DataClient, Protocol):
+    """Protocol for BEA client with specific method signature"""
+    def get_series_data(self, table_name: str, year: Optional[str] = None, 
+                       frequency: str = 'A', **kwargs) -> Dict[str, Any]: ...
+
+class BLSClientProtocol(DataClient, Protocol):
+    """Protocol for BLS client with specific method signature"""
+    def get_series_data(self, series_ids: Union[str, List[str]], 
+                       start_year: Optional[int] = None, 
+                       end_year: Optional[int] = None, **kwargs) -> pd.DataFrame: ...
+
+# Type-safe client references
+FREDClient: Optional[Type[FREDClientProtocol]] = None
+BEAClient: Optional[Type[BEAClientProtocol]] = None
+BLSClient: Optional[Type[BLSClientProtocol]] = None
+
+# Import actual client classes
+try:
+    from fred_client import FREDClient as FREDClientImpl
+    FREDClient = FREDClientImpl  # type: ignore
+except ImportError:
+    pass
+
+try:
+    from bea_client import BEAClient as BEAClientImpl
+    BEAClient = BEAClientImpl  # type: ignore
+except ImportError:
+    pass
+
+try:
+    from bls_client import BLSClient as BLSClientImpl
+    BLSClient = BLSClientImpl  # type: ignore
+except ImportError:
+    pass
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Initialize data source factory for multi-source streaming
+data_source_factory_instance = data_source_factory
 
 # Connection management
 active_connections: Set[str] = set()
@@ -161,10 +209,9 @@ connection_manager = ConnectionManager()
 
 
 class RealTimeDataStreamer:
-    """Real-time data streaming with BLS API integration"""
+    """Real-time data streaming with multi-source API integration"""
     
-    def __init__(self, bls_client: BLSClient):
-        self.bls_client = bls_client
+    def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.last_data_cache: Dict[str, Dict[str, Any]] = {}
         self.cache_timeout = 300  # 5 minutes
@@ -186,7 +233,7 @@ class RealTimeDataStreamer:
         client_ip = self._get_client_ip(request)
         connection_id = f"{client_ip}:{series_id}:{int(time.time())}"
         
-        # Add connection with rate limiting
+# Add connection with rate limiting
         if not connection_manager.add_connection(connection_id, client_ip, series_id):
             raise HTTPException(status_code=429, detail="Connection limit exceeded")
         
@@ -205,7 +252,7 @@ class RealTimeDataStreamer:
                         break
                     
                     try:
-                        # Get latest data from BLS API
+                        # Get latest data from appropriate source API
                         current_data = await self._fetch_latest_data(series_id)
                         
                         if current_data:
@@ -238,7 +285,7 @@ class RealTimeDataStreamer:
                                 self.logger.debug(f"No data change for {series_id}, skipping update")
                         else:
                             self.logger.warning(f"No data returned for {series_id}")
-                        
+                            
                     except HTTPException as e:
                         # Send error event to client
                         error_data = {
@@ -306,10 +353,10 @@ class RealTimeDataStreamer:
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Headers": "Cache-Control"
             }
-        )
+)
     
     async def _fetch_latest_data(self, series_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch latest data for a series with caching"""
+        """Fetch latest data for a series with caching from appropriate data source"""
         try:
             # Check cache first
             cache_key = f"latest_{series_id}"
@@ -319,43 +366,125 @@ class RealTimeDataStreamer:
                 now - self.last_data_cache[cache_key].get('timestamp', 0) < self.cache_timeout):
                 return self.last_data_cache[cache_key]['data']
             
-            # Fetch from BLS API
-            data_df = self.bls_client.get_latest_data(series_id)
-            
-            if data_df.empty:
+            # Determine data source for series_id
+            source = data_source_router.get_source_for_series_id(series_id)
+            if not source:
+                self.logger.error(f"Unknown series ID for streaming: {series_id}")
                 return None
             
-            # Extract latest point
-            latest_point = {
-                'date': data_df.iloc[0]['date'].strftime('%Y-%m-%d'),
-                'value': float(data_df.iloc[0]['value']) if pd.notna(data_df.iloc[0]['value']) else None,
-                'period': data_df.iloc[0]['period'],
-                'period_name': data_df.iloc[0]['period_name']
-            }
+            # Get appropriate client with explicit type annotation
+            client: Any = data_source_factory_instance.create_client(source)
+            latest_point = None
             
-            # Cache the result
-            self.last_data_cache[cache_key] = {
-                'data': latest_point,
-                'timestamp': now
-            }
+            if source == DataSource.BLS:
+                # Fetch from BLS API - check availability instead of isinstance
+                if BLSClient is None:
+                    raise HTTPException(status_code=503, detail="BLS service unavailable")
+                data_df = client.get_series_data(series_ids=series_id)
+                
+                if not hasattr(data_df, 'empty') or data_df.empty:
+                    return None
+                
+                # Extract latest point
+                latest_point = {
+                    'date': data_df.iloc[0]['date'].strftime('%Y-%m-%d'),
+                    'value': float(data_df.iloc[0]['value']) if pd.notna(data_df.iloc[0]['value']) else None,
+                    'period': data_df.iloc[0]['period'],
+                    'period_name': data_df.iloc[0]['period_name'],
+                    'source': 'BLS'
+                }
+                
+            elif source == DataSource.FRED:
+                # Get latest data from FRED (limit to 1 observation, most recent)
+                if FREDClient is None:
+                    raise HTTPException(status_code=503, detail="FRED service unavailable")
+                raw_data = client.get_series_data(
+                    series_ids=series_id,
+                    limit=1,
+                    sort_order='desc'
+                )
+                
+                if not raw_data or 'observations' not in raw_data or not raw_data['observations']:
+                    return None
+                
+                obs = raw_data['observations'][0]
+                latest_point = {
+                    'date': obs['date'],
+                    'value': obs['value'],
+                    'period': obs['date'][:7],  # YYYY-MM format
+                    'period_name': obs['date'],
+                    'source': 'FRED'
+                }
+                
+            elif source == DataSource.BEA:
+                # BEA doesn't have a simple "latest" endpoint, get most recent year
+                current_year = datetime.now().year
+                if BEAClient is None:
+                    raise HTTPException(status_code=503, detail="BEA service unavailable")
+                raw_data = client.get_series_data(
+                    table_name=series_id,
+                    year=str(current_year)
+                )
+                
+                if not raw_data or 'BEAAPI' not in raw_data:
+                    return None
+                
+                bea_data = raw_data['BEAAPI']['Results'].get('Data', [])
+                if not bea_data:
+                    return None
+                
+                # Get the most recent data point
+                latest_item = bea_data[-1]
+                time_period = latest_item.get('TimePeriod', '')
+                
+                # Convert BEA date format
+                if len(time_period) == 4:  # Year
+                    date_str = f"{time_period}-12-31"
+                else:
+                    date_str = time_period
+                
+                latest_point = {
+                    'date': date_str,
+                    'value': latest_item.get('DataValue', ''),
+                    'period': time_period,
+                    'period_name': time_period,
+                    'source': 'BEA'
+                }
             
-            return latest_point
-            
-        except BLSAPIException as e:
-            self.logger.error(f"BLS API error fetching latest data for {series_id}: {str(e)}")
-            raise HTTPException(status_code=503, detail="BLS API service unavailable")
+            if latest_point:
+                # Cache the result
+                self.last_data_cache[cache_key] = {
+                    'data': latest_point,
+                    'timestamp': now
+                }
+                
+                return latest_point
+            else:
+                return None
+                
         except Exception as e:
             self.logger.error(f"Error fetching latest data for {series_id}: {str(e)}")
-            raise HTTPException(status_code=500, detail="Internal server error")
+# For streaming, don't raise HTTP exceptions, just return None
+            return None
     
     def _validate_series_id(self, series_id: str) -> bool:
-        """Validate series ID against known indicators"""
-        # This should be expanded to check against database
-        valid_series = [
-            "CUUR0000SA0", "LNS14000000", "CES0000000001", "LNS11300000",
-            "LNS12000000", "LNS13000000"
-        ]
-        return series_id in valid_series
+        """Validate series ID against known indicators from all sources"""
+        try:
+            # Use data source router to determine if series is valid
+            source = data_source_router.get_source_for_series_id(series_id)
+            return source is not None
+        except Exception:
+            # Fallback to basic validation if router fails
+            valid_series = [
+                # BLS series
+                "CUUR0000SA0", "LNS14000000", "CES0000000001", "LNS11300000",
+                "LNS12000000", "LNS13000000",
+                # FRED series
+                "GDPC1", "UNRATE", "CPIAUCSL", "FEDFUNDS",
+                # BEA series (table names)
+                "T10101", "A191RX", "T20100"
+            ]
+            return series_id in valid_series
     
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request"""
@@ -467,8 +596,8 @@ async def periodic_cleanup():
 streamer: Optional[RealTimeDataStreamer] = None
 
 
-def initialize_streaming(bls_client: BLSClient):
-    """Initialize streaming with BLS client"""
+def initialize_streaming():
+    """Initialize streaming with multi-source support"""
     global streamer
-    streamer = RealTimeDataStreamer(bls_client)
-    logger.info("Real-time streaming initialized")
+    streamer = RealTimeDataStreamer()
+    logger.info("Real-time streaming initialized with multi-source support")

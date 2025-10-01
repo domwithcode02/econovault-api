@@ -9,7 +9,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Union, Any
 from enum import Enum
-from fastapi import Security, HTTPException, status, Depends
+from fastapi import Security, HTTPException, status, Depends, Header
 from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from cryptography.fernet import Fernet
@@ -1002,7 +1002,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
 
 
 async def get_optional_api_key(
-    authorization: Optional[str] = None,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
     db: Session = Depends(get_db)
 ) -> Optional[APIKeyInfo]:
     """Extract and validate API key from Authorization header (optional)"""

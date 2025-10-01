@@ -9,7 +9,7 @@ import json
 import time
 from typing import Optional, Dict, Any, List, Generic, TypeVar, Union, TYPE_CHECKING
 from datetime import datetime
-from pydantic import BaseModel, Field, validator, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_serializer
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc
 import logging
@@ -27,15 +27,12 @@ class Cursor(BaseModel):
     value: Union[str, int, datetime]
     direction: str = Field(default="next", pattern=r"^(next|prev)$")
     
-    class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
-        
-        @classmethod
-        def __get_pydantic_core_schema__(cls, source_type, handler):
-            config_dict = ConfigDict(json_encoders=cls.json_encoders)
-            return handler(source_type).update(config_dict=config_dict)
+    @field_serializer('value')
+    def serialize_value(self, value: Union[str, int, datetime], _info) -> Union[str, int]:
+        """Serialize datetime values to ISO format"""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
 
 
 class PageInfo(BaseModel):
@@ -57,6 +54,20 @@ class CursorPaginationParams(BaseModel):
     class Config:
         # Allow forward references to be resolved
         arbitrary_types_allowed = True
+
+
+# Rebuild the model to resolve any forward references
+CursorPaginationParams.model_rebuild()
+
+
+def get_pagination_params(
+    first: Optional[int] = None,
+    after: Optional[str] = None,
+    last: Optional[int] = None,
+    before: Optional[str] = None
+) -> CursorPaginationParams:
+    """Dependency function for cursor-based pagination parameters"""
+    return CursorPaginationParams(first=first, after=after, last=last, before=before)
 
 
 class CursorPaginationResponse(BaseModel, Generic[T]):
