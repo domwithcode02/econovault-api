@@ -2329,6 +2329,7 @@ result.data.edges.forEach(edge => {
     }
 )
 async def get_indicator_data(
+    request: Request,
     series_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -2342,7 +2343,7 @@ async def get_indicator_data(
     """Get time series data for a specific indicator with cursor-based pagination and filtering."""
     # Check if series is in our popular series list
     if series_id not in popular_series:
-        error_response = create_not_found_error_response("Indicator", series_id, None)
+        error_response = create_not_found_error_response("Indicator", series_id, request)
         return JSONResponse(
             status_code=error_response.status_code,
             content=error_response.dict(exclude_none=True)
@@ -2470,7 +2471,7 @@ async def get_indicator_data(
                     constraint="valid_filter_expression",
                     suggestions=["Check filter syntax and field names"]
                 )
-            error_response = create_validation_error_response([field_error], None)
+            error_response = create_validation_error_response([field_error], request)
             return JSONResponse(
                 status_code=error_response.status_code,
                 content=error_response.dict(exclude_none=True)
